@@ -149,7 +149,7 @@ fn markdown_response(md: String) -> Response {
 fn map_arxiv_err(e: ArxivError) -> Response {
     match e {
         ArxivError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
-        ArxivError::PdfOnly => (StatusCode::UNPROCESSABLE_ENTITY, "PDF only").into_response(),
+        ArxivError::PdfOnly => (StatusCode::UNPROCESSABLE_ENTITY, "Error: PDF only").into_response(),
         ArxivError::Network(msg) => (StatusCode::BAD_GATEWAY, msg).into_response(),
         ArxivError::NotImplemented => (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response(),
     }

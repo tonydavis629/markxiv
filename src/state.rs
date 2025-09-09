@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use crate::arxiv::ArxivClient;
 use crate::cache::MkCache;
 use crate::convert::Converter;
-use crate::disk_cache::{DiskCache, DiskCacheConfig};
+use crate::disk_cache::{DiskCache};
 
 #[derive(Clone)]
 pub struct AppState {
