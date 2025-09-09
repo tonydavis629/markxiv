@@ -155,8 +155,7 @@ async fn cleanup(path: &Path) {
 }
 
 fn sanitize_markdown(input: &str) -> String {
-    // Remove all <figure ...>...</figure> blocks which often contain embedded PDFs
-    // Keep it simple to avoid extra deps; iterate until no more occurrences.
+    // 1) Remove entire <figure ...>...</figure> blocks (with embedded pdfs)
     let mut out = input.to_string();
     loop {
         let Some(start) = out.find("<figure") else { break };
@@ -165,7 +164,6 @@ fn sanitize_markdown(input: &str) -> String {
             out.replace_range(start..end, "");
         } else {
             // No closing tag; remove from start to next block break or end
-            // Try to find double newline as a block boundary
             if let Some(rel_end) = out[start..].find("\n\n") {
                 let end = start + rel_end;
                 out.replace_range(start..end, "");
@@ -175,12 +173,32 @@ fn sanitize_markdown(input: &str) -> String {
             }
         }
     }
-    out.trim_start().to_string()
+    // 2) Strip any remaining HTML tags but keep their inner text
+    strip_html_tags(out.trim_start())
+}
+
+fn strip_html_tags(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                if !in_tag {
+                    out.push('>');
+                } else {
+                    in_tag = false;
+                }
+            }
+            _ => if !in_tag { out.push(ch) },
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod sanitize_tests {
-    use super::sanitize_markdown;
+    use super::{sanitize_markdown, strip_html_tags};
 
     #[test]
     fn removes_figure_block() {
