@@ -1,10 +1,19 @@
 name: release
 
 on:
-  workflow_dispatch: {}
+  # Manual run for an existing tag
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (e.g., v0.1.0)
+        required: true
+  # Auto-build when pushing a tag like v0.1.0
   push:
     tags:
       - 'v*'
+  # Build when a Release is published in the UI
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -16,8 +25,27 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
+      - name: Derive tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "TAG=${{ github.event.release.tag_name }}" >> "$GITHUB_ENV"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "TAG=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "Unsupported event: ${{ github.event_name }}" >&2
+            exit 1
+          fi
+          echo "Building tag: $(grep '^TAG=' "$GITHUB_ENV" | cut -d= -f2)"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -42,10 +70,10 @@ jobs:
       - name: Publish GitHub Release asset
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           files: |
             markxiv-linux-x86_64
             markxiv-linux-x86_64.sha256
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
