@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use thiserror::Error;
+use reqwest::Url;
 
 #[derive(Clone, Debug, Error)]
 pub enum ArxivError {
@@ -20,24 +21,73 @@ pub trait ArxivClient {
     async fn get_source_archive(&self, id: &str) -> Result<Bytes, ArxivError>;
 }
 
-pub struct ReqwestArxivClient;
+pub struct ReqwestArxivClient {
+    http: reqwest::Client,
+}
 
 impl ReqwestArxivClient {
     pub fn new() -> Self {
-        Self
+            let http = reqwest::Client::builder()
+                .user_agent("markxiv/0.1 (+https://github.com/)")
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .expect("failed to build reqwest client");
+        Self { http }
     }
 }
 
 #[async_trait]
 impl ArxivClient for ReqwestArxivClient {
-    async fn exists(&self, _id: &str) -> Result<bool, ArxivError> {
-        // TODO: Implement using export.arxiv.org API; stubbed for now
-        Err(ArxivError::NotImplemented)
+    async fn exists(&self, id: &str) -> Result<bool, ArxivError> {
+        let url = Url::parse_with_params(
+            "https://export.arxiv.org/api/query",
+            &[("id_list", id)],
+        )
+        .map_err(|e| ArxivError::Network(e.to_string()))?;
+        let res = self
+            .http
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/atom+xml")
+            .send()
+            .await
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
+        if !res.status().is_success() {
+            return Err(ArxivError::Network(format!(
+                "arXiv exists check HTTP {}",
+                res.status()
+            )));
+        }
+        let body = res
+            .text()
+            .await
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
+        // Minimal parse: an empty feed has no <entry>; existing id yields at least one <entry>
+        Ok(body.contains("<entry"))
     }
 
-    async fn get_source_archive(&self, _id: &str) -> Result<Bytes, ArxivError> {
-        // TODO: Implement download of e-print source; stubbed for now
-        Err(ArxivError::NotImplemented)
+    async fn get_source_archive(&self, id: &str) -> Result<Bytes, ArxivError> {
+        let url = format!("https://arxiv.org/e-print/{}", id);
+        let res = self
+            .http
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/x-eprint-tar, application/x-tar, application/octet-stream")
+            .send()
+            .await
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
+
+        let status = res.status();
+        if status.is_success() {
+            let bytes = res
+                .bytes()
+                .await
+                .map_err(|e| ArxivError::Network(e.to_string()))?;
+            return Ok(bytes);
+        }
+        // Common cases: 400/403/404 when no source available → treat as PDF only
+        if status.as_u16() == 400 || status.as_u16() == 403 || status.as_u16() == 404 {
+            return Err(ArxivError::PdfOnly);
+        }
+        Err(ArxivError::Network(format!("arXiv e-print HTTP {}", status)))
     }
 }
 

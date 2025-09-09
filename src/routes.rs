@@ -175,7 +175,7 @@ mod tests {
         let state = AppState::new(8, client, converter);
 
         let app = Router::new()
-            .route("/paper/:id", get(super::paper))
+            .route("/abs/:id", get(super::paper))
             .with_state(state.clone());
 
         // First request populates cache
@@ -183,7 +183,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/paper/{}", id))
+                    .uri(format!("/abs/{}", id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -195,7 +195,7 @@ mod tests {
         let res2 = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/paper/{}", id))
+                    .uri(format!("/abs/{}", id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -212,13 +212,13 @@ mod tests {
         let state = AppState::new(8, client, converter);
 
         let app = Router::new()
-            .route("/paper/:id", get(super::paper))
+            .route("/abs/:id", get(super::paper))
             .with_state(state);
 
         let res = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/paper/{}", id))
+                    .uri(format!("/abs/{}", id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -234,7 +234,7 @@ mod tests {
         let state = AppState::new(8, client, converter);
 
         let app = Router::new()
-            .route("/paper/:id", get(super::paper))
+            .route("/abs/:id", get(super::paper))
             .with_state(state);
 
         let res = app

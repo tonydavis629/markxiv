@@ -29,7 +29,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(routes::index))
         .route("/health", get(routes::health))
-        .route("/paper/:id", get(routes::paper))
+        .route("/abs/:id", get(routes::paper))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

@@ -83,13 +83,14 @@ Environment variables:
 - `PORT` (default `8080`)
 - `MARKXIV_CACHE_CAP` (default `128`) — number of cached papers
 - `MARKXIV_INDEX_MD` (default `content/index.md`) — path to landing page Markdown
+- `MARKXIV_PANDOC_PATH` (default `pandoc`) — path to pandoc binary
 
 ## Endpoints
 
 - `GET /` → serves landing page from Markdown file
   - Content negotiation: `Accept: text/html` renders Markdown to HTML; `Accept: text/markdown` returns raw Markdown
 - `GET /health` → `200 OK`, body `ok`
-- `GET /paper/:id[?refresh=1]` → `200 OK` with `text/markdown`
+- `GET /abs/:id[?refresh=1]` → `200 OK` with `text/markdown`
   - `:id` can be a base arXiv id (`1601.00001`) or versioned (`1601.00001v2`)
   - `?refresh=1` bypasses the cache and re-fetches/convert
 
@@ -126,7 +127,7 @@ Project layout:
   - Read `.tex` files, choose main using `select_main_tex`
   - Invoke `pandoc -f latex -t gfm main.tex` and capture stdout
 
-Once implemented, the server will return actual Markdown for source-available arXiv IDs.
+Once implemented, the server will return actual Markdown for source-available arXiv IDs. (Already implemented in code; you still need `pandoc` and `tar` available on PATH.)
 
 ## Example usage
 
@@ -141,7 +142,7 @@ curl -sI http://localhost:8080/ | grep -i content-type
 curl -sH 'Accept: text/markdown' http://localhost:8080/
 
 # fetch a paper (replace with a source-available id)
-curl -sH 'Accept: text/markdown' http://localhost:8080/paper/1601.00001
+curl -sH 'Accept: text/markdown' http://localhost:8080/abs/1601.00001
 
 # force refresh (bypass cache)
 curl -s http://localhost:8080/paper/1601.00001?refresh=1
