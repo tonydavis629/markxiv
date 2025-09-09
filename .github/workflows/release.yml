@@ -1,0 +1,51 @@
+name: release
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64-musl:
+    name: Build linux x86_64 (musl)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools binutils
+
+      - name: Build (release, static)
+        run: |
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Prepare artifact
+        run: |
+          cp target/x86_64-unknown-linux-musl/release/markxiv markxiv-linux-x86_64
+          strip markxiv-linux-x86_64
+          sha256sum markxiv-linux-x86_64 > markxiv-linux-x86_64.sha256
+
+      - name: Publish GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            markxiv-linux-x86_64
+            markxiv-linux-x86_64.sha256
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
