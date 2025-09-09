@@ -27,6 +27,7 @@ async fn main() {
     let state = AppState::new(cache_cap, client, converter);
 
     let app = Router::new()
+        .route("/", get(routes::index))
         .route("/health", get(routes::health))
         .route("/paper/:id", get(routes::paper))
         .with_state(state);
@@ -36,4 +37,3 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     axum::serve(listener, app).await.expect("server");
 }
-

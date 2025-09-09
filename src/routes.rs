@@ -1,10 +1,64 @@
 use std::sync::Arc;
 
-use axum::{extract::{Path, RawQuery, State}, http::StatusCode, response::{IntoResponse, Response}};
+use axum::{extract::{Path, RawQuery, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}};
 use bytes::Bytes;
 
 use crate::{arxiv::{ArxivClient, ArxivError}, cache::MkCache, convert::{ConvertError, Converter}};
 use tokio::sync::Mutex;
+
+pub async fn index(headers: HeaderMap) -> Response {
+    let path = std::env::var("MARKXIV_INDEX_MD").unwrap_or_else(|_| "content/index.md".to_string());
+    match tokio::fs::read_to_string(&path).await {
+        Ok(md) => {
+            let wants_html = wants_html(headers.get(axum::http::header::ACCEPT).and_then(|v| v.to_str().ok()));
+            if wants_html {
+                let html = render_markdown_html(&md);
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    html,
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+                    md,
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to read index markdown: {}", e),
+        )
+            .into_response(),
+    }
+}
+
+fn wants_html(accept: Option<&str>) -> bool {
+    match accept {
+        None => true,
+        Some(s) => {
+            let s = s.to_ascii_lowercase();
+            s.contains("text/html") || s.contains("*/*")
+        }
+    }
+}
+
+fn render_markdown_html(md: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_FOOTNOTES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TASKLISTS);
+    let parser = Parser::new_ext(md, opts);
+    let mut html_output = String::from("<!doctype html><meta charset=\"utf-8\"><title>markxiv</title><body>");
+    html::push_html(&mut html_output, parser);
+    html_output.push_str("</body>");
+    html_output
+}
 
 pub async fn health() -> &'static str {
     "ok"
@@ -193,5 +247,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn index_returns_markdown_when_requested() {
+        let app = Router::new().route("/", get(super::index));
+        let req = axum::http::Request::builder()
+            .uri("/")
+            .header(axum::http::header::ACCEPT, "text/markdown")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res.headers().get(axum::http::header::CONTENT_TYPE).unwrap();
+        assert_eq!(ct, "text/markdown; charset=utf-8");
+    }
+
+    #[tokio::test]
+    async fn index_defaults_to_html() {
+        let app = Router::new().route("/", get(super::index));
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res.headers().get(axum::http::header::CONTENT_TYPE).unwrap();
+        assert_eq!(ct, "text/html; charset=utf-8");
     }
 }
