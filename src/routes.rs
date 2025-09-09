@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{extract::{Path, RawQuery, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}};
 
-use crate::{arxiv::{ArxivClient, ArxivError, Metadata}, cache::MkCache, convert::{ConvertError, Converter}};
+use crate::{arxiv::{ArxivClient, ArxivError, Metadata}, cache::MkCache, convert::{ConvertError, Converter}, disk_cache::DiskCache};
 use tokio::sync::Mutex;
 
 pub async fn index(headers: HeaderMap) -> Response {
@@ -67,6 +67,7 @@ pub async fn paper(
     State(cache): State<Arc<Mutex<MkCache>>>,
     State(client): State<Arc<dyn ArxivClient + Send + Sync>>,
     State(converter): State<Arc<dyn Converter + Send + Sync>>,
+    State(disk): State<Option<Arc<DiskCache>>>,
     Path(id): Path<String>,
     raw_query: Option<RawQuery>,
 ) -> Response {
@@ -90,6 +91,16 @@ pub async fn paper(
     if !refresh {
         if let Some(md) = cache.lock().await.get(&id) {
             return markdown_response(md);
+        }
+        if let Some(dc) = &disk {
+            match dc.get(&id).await {
+                Ok(Some(md)) => {
+                    cache.lock().await.put(id.clone(), md.clone());
+                    return markdown_response(md);
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("disk cache read error: {}", e),
+            }
         }
     }
 
@@ -118,6 +129,11 @@ pub async fn paper(
     };
 
     cache.lock().await.put(id.clone(), final_md.clone());
+    if let Some(dc) = &disk {
+        if let Err(e) = dc.put(&id, &final_md).await {
+            eprintln!("disk cache write error: {}", e);
+        }
+    }
     markdown_response(final_md)
 }
 
@@ -221,7 +237,7 @@ mod tests {
         let meta = Metadata { title: "Sample Title".into(), summary: "Sample abstract".into() };
         let client = MockArxivClient::new(Ok(true), Ok(tar), Ok(meta));
         let converter = MockConverter { result: Ok(md.clone()) };
-        let state = AppState::new(8, client, converter);
+        let state = AppState::new(8, client, converter, None);
 
         let app = Router::new()
             .route("/abs/:id", get(super::paper))
@@ -258,7 +274,7 @@ mod tests {
         let id = "1234.5678";
         let client = MockArxivClient::new(Ok(true), Err(ArxivError::PdfOnly), Ok(Metadata { title: String::new(), summary: String::new() }));
         let converter = MockConverter { result: Ok("".into()) };
-        let state = AppState::new(8, client, converter);
+        let state = AppState::new(8, client, converter, None);
 
         let app = Router::new()
             .route("/abs/:id", get(super::paper))
@@ -280,7 +296,7 @@ mod tests {
     async fn invalid_id_400() {
         let client = MockArxivClient::new(Ok(true), Err(ArxivError::PdfOnly), Ok(Metadata { title: String::new(), summary: String::new() }));
         let converter = MockConverter { result: Ok("".into()) };
-        let state = AppState::new(8, client, converter);
+        let state = AppState::new(8, client, converter, None);
 
         let app = Router::new()
             .route("/abs/:id", get(super::paper))

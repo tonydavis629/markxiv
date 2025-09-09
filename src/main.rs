@@ -8,10 +8,12 @@ mod cache;
 mod arxiv;
 mod convert;
 mod tex_main;
+mod disk_cache;
 
 use crate::arxiv::ReqwestArxivClient;
 use crate::convert::PandocConverter;
 use crate::state::AppState;
+use crate::disk_cache::{DiskCache, DiskCacheConfig};
 
 #[tokio::main]
 async fn main() {
@@ -24,7 +26,22 @@ async fn main() {
     let client = ReqwestArxivClient::new();
     let converter = PandocConverter::new();
 
-    let state = AppState::new(cache_cap, client, converter);
+    // Optional disk cache
+    let disk_cap_bytes = std::env::var("MARKXIV_DISK_CACHE_CAP_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let disk = if disk_cap_bytes > 0 {
+        let root = std::env::var("MARKXIV_CACHE_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from("cache"));
+        let sweep_secs = std::env::var("MARKXIV_SWEEP_INTERVAL_SECS").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(600);
+        let cfg = DiskCacheConfig { root, cap_bytes: disk_cap_bytes, sweep_interval: std::time::Duration::from_secs(sweep_secs) };
+        match DiskCache::new(cfg).await {
+            Ok(dc) => Some(dc),
+            Err(e) => { eprintln!("disk cache init failed: {}", e); None }
+        }
+    } else { None };
+
+    let state = AppState::new(cache_cap, client, converter, disk);
 
     let app = Router::new()
         .route("/", get(routes::index))

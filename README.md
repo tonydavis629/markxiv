@@ -10,7 +10,7 @@ Given an arXiv ID, the server:
 
 If a paper is PDF-only (no source available), the server returns `422 Unprocessable Entity` with body `PDF only`.
 
-> Note: The repository is scaffolded with the full HTTP pipeline and tests using mocks. The real arXiv client and pandoc-based converter are wired but currently stubbed. You can still run the server and tests; conversion will return `501 Not Implemented` until the implementations are completed.
+Returned Markdown includes the paper title and abstract prepended at the top.
 
 ## Requirements
 
@@ -84,6 +84,9 @@ Environment variables:
 - `MARKXIV_CACHE_CAP` (default `128`) — number of cached papers
 - `MARKXIV_INDEX_MD` (default `content/index.md`) — path to landing page Markdown
 - `MARKXIV_PANDOC_PATH` (default `pandoc`) — path to pandoc binary
+- `MARKXIV_CACHE_DIR` (default `./cache`) — on-disk cache root directory
+- `MARKXIV_DISK_CACHE_CAP_BYTES` (default `0`) — on-disk cache size cap in bytes (0 disables disk cache)
+- `MARKXIV_SWEEP_INTERVAL_SECS` (default `600`) — background sweeper interval seconds
 
 ## Endpoints
 
@@ -93,13 +96,14 @@ Environment variables:
 - `GET /abs/:id[?refresh=1]` → `200 OK` with `text/markdown`
   - `:id` can be a base arXiv id (`1601.00001`) or versioned (`1601.00001v2`)
   - `?refresh=1` bypasses the cache and re-fetches/convert
+  - Response is pure Markdown, prefixed by `# {title}` and `Abstract: {abstract}`
+  - Two-tier caching: in-memory LRU first, then on-disk gzip store; cache populated on miss
 
 Error mapping:
 - `404 Not Found` — unknown arXiv id
 - `422 Unprocessable Entity` — PDF only (no e-print source)
 - `502 Bad Gateway` — upstream/network error contacting arXiv
 - `500 Internal Server Error` — conversion/extraction errors
-- `501 Not Implemented` — current placeholder until the download/convert is implemented
 
 ## Development
 
@@ -110,24 +114,20 @@ cargo test
 
 Project layout:
 - `src/main.rs` — server bootstrap
-- `src/routes.rs` — handlers (`/health`, `/paper/:id`)
+- `src/routes.rs` — handlers (`/`, `/health`, `/abs/:id`)
 - `src/state.rs` — shared state (LRU cache + clients)
 - `src/cache.rs` — thin wrapper around `lru::LruCache`
-- `src/arxiv.rs` — arXiv client trait, errors, reqwest stub, and test mock
-- `src/convert.rs` — converter trait, errors, pandoc stub, and test mock
+- `src/arxiv.rs` — arXiv client + metadata fetch via Atom API
+- `src/convert.rs` — pandoc-based converter + sanitization
 - `src/tex_main.rs` — heuristic for picking the main `.tex` file
 
-### Implementation plan (next)
+### How it works
 
-- Implement `ArxivClient` using:
-  - `exists(id)`: `https://export.arxiv.org/api/query?id_list=:id` → check for an `<entry>` element
-  - `get_source_archive(id)`: `https://arxiv.org/e-print/:id` → returns tar-like content if source is available; map missing/unavailable to `PdfOnly`
-- Implement `PandocConverter`:
-  - Write bytes to a temp dir, extract with `tar -xf`
-  - Read `.tex` files, choose main using `select_main_tex`
-  - Invoke `pandoc -f latex -t gfm main.tex` and capture stdout
-
-Once implemented, the server will return actual Markdown for source-available arXiv IDs. (Already implemented in code; you still need `pandoc` and `tar` available on PATH.)
+- Metadata (title, abstract): `https://export.arxiv.org/api/query?id_list=:id` (Atom feed), minimal parse of `<entry><title>` and `<summary>`.
+- Source archive: `https://arxiv.org/e-print/:id` (tar/tar.gz). 400/403/404 → treated as PDF-only.
+- Conversion: save archive to temp dir → extract with `tar` → pick main `.tex` → `pandoc -f latex -t gfm` → sanitize.
+- Sanitization: remove entire `<figure>...</figure>` blocks and strip all remaining HTML tags from the Markdown output.
+- Caching: small in-memory LRU for hot entries, plus an on-disk gzip store with size cap and background sweeper that deletes oldest files when over cap.
 
 ## Example usage
 
@@ -145,11 +145,16 @@ curl -sH 'Accept: text/markdown' http://localhost:8080/
 curl -sH 'Accept: text/markdown' http://localhost:8080/abs/1601.00001
 
 # force refresh (bypass cache)
-curl -s http://localhost:8080/paper/1601.00001?refresh=1
+curl -s http://localhost:8080/abs/1601.00001?refresh=1
+
+# enable disk cache with ~10 GB cap
+MARKXIV_DISK_CACHE_CAP_BYTES=$((10*1024*1024*1024)) cargo run
 ```
 
 ## Notes
 
 - Conversion fidelity depends on pandoc and the paper’s LaTeX structure; complex macros/environments may not convert perfectly.
+- Title and abstract are prepended to the Markdown as `# Title` and `Abstract: ...`.
+- HTML is stripped from the final Markdown; embedded PDF figures are removed.
 - Caching is in-memory only; restart clears cache.
 - For production use, consider timeouts, rate limiting, and persistent caching.

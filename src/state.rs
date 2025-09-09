@@ -6,16 +6,18 @@ use tokio::sync::Mutex;
 use crate::arxiv::ArxivClient;
 use crate::cache::MkCache;
 use crate::convert::Converter;
+use crate::disk_cache::{DiskCache, DiskCacheConfig};
 
 #[derive(Clone)]
 pub struct AppState {
     pub cache: Arc<Mutex<MkCache>>,
     pub client: Arc<dyn ArxivClient + Send + Sync>,
     pub converter: Arc<dyn Converter + Send + Sync>,
+    pub disk: Option<Arc<DiskCache>>,
 }
 
 impl AppState {
-    pub fn new<C, V>(cap: usize, client: C, converter: V) -> Self
+    pub fn new<C, V>(cap: usize, client: C, converter: V, disk: Option<Arc<DiskCache>>) -> Self
     where
         C: ArxivClient + Send + Sync + 'static,
         V: Converter + Send + Sync + 'static,
@@ -24,6 +26,7 @@ impl AppState {
             cache: Arc::new(Mutex::new(MkCache::new(cap))),
             client: Arc::new(client),
             converter: Arc::new(converter),
+            disk,
         }
     }
 }
@@ -46,3 +49,8 @@ impl FromRef<AppState> for Arc<dyn Converter + Send + Sync> {
     }
 }
 
+impl FromRef<AppState> for Option<Arc<DiskCache>> {
+    fn from_ref(input: &AppState) -> Self {
+        input.disk.clone()
+    }
+}

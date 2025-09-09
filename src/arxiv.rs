@@ -78,10 +78,28 @@ impl ArxivClient for ReqwestArxivClient {
 
         let status = res.status();
         if status.is_success() {
+            // Inspect content-type and payload to avoid passing non-archives downstream
+            let content_type = res
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+
             let bytes = res
                 .bytes()
                 .await
                 .map_err(|e| ArxivError::Network(e.to_string()))?;
+
+            // If arXiv returns a PDF (no source available), map to PdfOnly
+            if content_type.contains("application/pdf") || looks_like_pdf(&bytes) {
+                return Err(ArxivError::PdfOnly);
+            }
+            // Some upstream issues (e.g., HTML error pages) can slip through as 200s
+            if content_type.contains("text/html") || looks_like_html(&bytes) {
+                return Err(ArxivError::Network("arXiv returned HTML when requesting e-print".into()));
+            }
+            // Otherwise, assume it's an archive (tar or tar.gz). The converter will try both.
             return Ok(bytes);
         }
         // Common cases: 400/403/404 when no source available → treat as PDF only
@@ -147,6 +165,22 @@ fn extract_tag(s: &str, tag: &str) -> Option<String> {
     let close = format!("</{}>", tag);
     let end_rel = after.find(&close)?;
     Some(after[..end_rel].to_string())
+}
+
+// Heuristics to detect unexpected payloads from the e-print endpoint
+fn looks_like_pdf(bytes: &[u8]) -> bool {
+    bytes.len() >= 5 && &bytes[..5] == b"%PDF-"
+}
+
+fn looks_like_html(bytes: &[u8]) -> bool {
+    // Look at the first 1024 bytes, trim leading whitespace, then match common HTML signatures
+    let n = bytes.len().min(1024);
+    let mut i = 0;
+    while i < n && matches!(bytes[i], b'\t' | b'\n' | b'\r' | b' ') { i += 1; }
+    if i >= n { return false; }
+    if bytes[i] != b'<' { return false; }
+    let s = String::from_utf8_lossy(&bytes[i..n]).to_ascii_lowercase();
+    s.starts_with("<!doctype html") || s.starts_with("<html")
 }
 
 #[cfg(test)]
