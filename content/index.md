@@ -1,4 +1,4 @@
-## markxiv.org is a web service that serves Markdown versions of arXiv papers
+## markxiv.org serves Markdown versions of arXiv papers
 
 ## Simply replace the 'arxiv' in an arXiv URL with 'markxiv' to get the Markdown version
 
