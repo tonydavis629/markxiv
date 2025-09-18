@@ -96,7 +96,7 @@ Environment variables:
 - `GET /abs/:id[?refresh=1]` → `200 OK` with `text/markdown`
   - `:id` can be a base arXiv id (`1601.00001`) or versioned (`1601.00001v2`)
   - `?refresh=1` bypasses the cache and re-fetches/convert
-  - Response is pure Markdown, prefixed by `# {title}` and `Abstract: {abstract}`
+  - Response is pure Markdown, prefixed by `# {title}` and a `##Abstract` section containing the abstract text
   - Two-tier caching: in-memory LRU first, then on-disk gzip store; cache populated on miss
 
 Error mapping:
@@ -154,7 +154,7 @@ MARKXIV_DISK_CACHE_CAP_BYTES=$((10*1024*1024*1024)) cargo run
 ## Notes
 
 - Conversion fidelity depends on pandoc and the paper’s LaTeX structure; complex macros/environments may not convert perfectly.
-- Title and abstract are prepended to the Markdown as `# Title` and `Abstract: ...`.
+- Title and abstract are prepended to the Markdown as `# Title` and a `##Abstract` heading followed by the abstract.
 - HTML is stripped from the final Markdown; embedded PDF figures are removed.
 - Caching is in-memory only; restart clears cache.
 - For production use, consider timeouts, rate limiting, and persistent caching.

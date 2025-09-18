@@ -1,8 +1,8 @@
 ## markxiv.org is a web service that serves Markdown versions of arXiv papers
 
-## This makes it easier to feed papers into AI tools
+## Simply replace the 'arxiv' in an arXiv URL with 'markxiv' to get the Markdown version
 
-## Not all papers have LaTeX sources; PDF-only papers return a 422 error
+## Not all papers can be converted; PDF-only papers return a 422 error with body "PDF only"
 
 ## This service is [free and open source](https://github.com/tonydavis629/markxiv)
 

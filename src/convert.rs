@@ -198,7 +198,7 @@ fn strip_html_tags(input: &str) -> String {
 
 #[cfg(test)]
 mod sanitize_tests {
-    use super::{sanitize_markdown, strip_html_tags};
+    use super::sanitize_markdown;
 
     #[test]
     fn removes_figure_block() {

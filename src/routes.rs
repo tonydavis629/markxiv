@@ -68,13 +68,18 @@ pub async fn paper(
     State(client): State<Arc<dyn ArxivClient + Send + Sync>>,
     State(converter): State<Arc<dyn Converter + Send + Sync>>,
     State(disk): State<Option<Arc<DiskCache>>>,
-    Path(id): Path<String>,
+    Path(raw_id): Path<String>,
     raw_query: Option<RawQuery>,
 ) -> Response {
+    let trimmed = raw_id.trim();
+    let normalized = normalize_id(trimmed);
+
     // Minimal id validation: non-empty and ascii
-    if id.trim().is_empty() || !id.is_ascii() {
+    if normalized.is_empty() || !normalized.is_ascii() {
         return (StatusCode::BAD_REQUEST, "invalid id").into_response();
     }
+
+    let id = normalized.to_string();
 
     let refresh = raw_query
         .and_then(|q| q.0)
@@ -137,6 +142,16 @@ pub async fn paper(
     markdown_response(final_md)
 }
 
+fn normalize_id(raw: &str) -> &str {
+    if raw.len() >= 4 {
+        let cut = raw.len() - 4;
+        if raw.is_char_boundary(cut) && raw[cut..].eq_ignore_ascii_case(".pdf") {
+            return &raw[..cut];
+        }
+    }
+    raw
+}
+
 fn markdown_response(md: String) -> Response {
     (
         StatusCode::OK,
@@ -191,14 +206,25 @@ fn strip_html_tags(input: &str) -> String {
 fn prepend_metadata(meta: &Metadata, body_md: &str) -> String {
     let title = strip_html_tags(&meta.title).trim().to_string();
     let abstract_text = strip_html_tags(&meta.summary).trim().to_string();
+    let authors: Vec<String> = meta
+        .authors
+        .iter()
+        .map(|a| strip_html_tags(a).trim().to_string())
+        .filter(|a| !a.is_empty())
+        .collect();
     let mut out = String::new();
     if !title.is_empty() {
         out.push_str("# ");
         out.push_str(&title);
         out.push_str("\n\n");
     }
+    if !authors.is_empty() {
+        out.push_str("## Authors\n");
+        out.push_str(&authors.join(", "));
+        out.push_str("\n\n");
+    }
     if !abstract_text.is_empty() {
-        out.push_str("Abstract: ");
+        out.push_str("## Abstract\n");
         out.push_str(&abstract_text);
         out.push_str("\n\n");
     }
@@ -212,10 +238,22 @@ mod tests {
     use axum::{routing::get, Router};
     use bytes::Bytes;
     use tower::ServiceExt; // for `oneshot`
+    use std::sync::atomic::Ordering;
 
     use crate::arxiv::test_helpers::MockArxivClient;
     use crate::convert::test_helpers::MockConverter;
     use crate::state::AppState;
+
+    #[test]
+    fn prepend_metadata_includes_authors_section() {
+        let meta = Metadata {
+            title: "Sample Title".into(),
+            summary: "Sample abstract".into(),
+            authors: vec!["Alice Example".into(), "Bob <i>Author</i>".into()],
+        };
+        let out = super::prepend_metadata(&meta, "Body");
+        assert!(out.starts_with("# Sample Title\n\n## Authors\nAlice Example, Bob Author\n\n##Abstract\nSample abstract\n\nBody"));
+    }
 
     #[tokio::test]
     async fn health_ok() {
@@ -234,7 +272,7 @@ mod tests {
         let tar = Bytes::from_static(b"tar-bytes");
         let md = "# Hello".to_string();
 
-        let meta = Metadata { title: "Sample Title".into(), summary: "Sample abstract".into() };
+        let meta = Metadata { title: "Sample Title".into(), summary: "Sample abstract".into(), authors: vec!["First Author".into(), "Second Author".into()] };
         let client = MockArxivClient::new(Ok(true), Ok(tar), Ok(meta));
         let converter = MockConverter { result: Ok(md.clone()) };
         let state = AppState::new(8, client, converter, None);
@@ -270,9 +308,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pdf_route_accepts_pdf_suffix_and_hits_cache() {
+        let id = "1234.5678v3";
+        let tar = Bytes::from_static(b"tar-bytes");
+        let md = "# Hello".to_string();
+
+        let meta = Metadata { title: "Sample Title".into(), summary: "Sample abstract".into(), authors: Vec::new() };
+        let client = MockArxivClient::new(Ok(true), Ok(tar), Ok(meta));
+        let metadata_calls = client.metadata_calls.clone();
+        let archive_calls = client.archive_calls.clone();
+        let converter = MockConverter { result: Ok(md.clone()) };
+        let state = AppState::new(8, client, converter, None);
+
+        let app = Router::new()
+            .route("/abs/:id", get(super::paper))
+            .route("/pdf/:id", get(super::paper))
+            .with_state(state);
+
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/pdf/{}.pdf", id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
+
+        let res2 = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/abs/{}", id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res2.status(), StatusCode::OK);
+        assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn pdf_only_maps_to_422() {
         let id = "1234.5678";
-        let client = MockArxivClient::new(Ok(true), Err(ArxivError::PdfOnly), Ok(Metadata { title: String::new(), summary: String::new() }));
+        let client = MockArxivClient::new(Ok(true), Err(ArxivError::PdfOnly), Ok(Metadata { title: String::new(), summary: String::new(), authors: Vec::new() }));
         let converter = MockConverter { result: Ok("".into()) };
         let state = AppState::new(8, client, converter, None);
 
@@ -294,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_id_400() {
-        let client = MockArxivClient::new(Ok(true), Err(ArxivError::PdfOnly), Ok(Metadata { title: String::new(), summary: String::new() }));
+        let client = MockArxivClient::new(Ok(true), Err(ArxivError::PdfOnly), Ok(Metadata { title: String::new(), summary: String::new(), authors: Vec::new() }));
         let converter = MockConverter { result: Ok("".into()) };
         let state = AppState::new(8, client, converter, None);
 

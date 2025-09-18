@@ -47,6 +47,7 @@ async fn main() {
         .route("/", get(routes::index))
         .route("/health", get(routes::health))
         .route("/abs/:id", get(routes::paper))
+        .route("/pdf/:id", get(routes::paper))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

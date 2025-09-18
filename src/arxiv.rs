@@ -143,6 +143,7 @@ impl ArxivClient for ReqwestArxivClient {
 pub struct Metadata {
     pub title: String,
     pub summary: String,
+    pub authors: Vec<String>,
 }
 
 fn parse_atom_metadata(atom: &str) -> Option<Metadata> {
@@ -152,7 +153,8 @@ fn parse_atom_metadata(atom: &str) -> Option<Metadata> {
     let entry = &atom[entry_start..entry_start + entry_end_rel + "</entry>".len()];
     let title = extract_tag(entry, "title")?.trim().to_string();
     let summary = extract_tag(entry, "summary").unwrap_or_default().trim().to_string();
-    Some(Metadata { title, summary })
+    let authors = extract_authors(entry);
+    Some(Metadata { title, summary, authors })
 }
 
 fn extract_tag(s: &str, tag: &str) -> Option<String> {
@@ -165,6 +167,25 @@ fn extract_tag(s: &str, tag: &str) -> Option<String> {
     let close = format!("</{}>", tag);
     let end_rel = after.find(&close)?;
     Some(after[..end_rel].to_string())
+}
+
+fn extract_authors(entry: &str) -> Vec<String> {
+    let mut authors = Vec::new();
+    let mut remainder = entry;
+    while let Some(start) = remainder.find("<author") {
+        let author_section = &remainder[start..];
+        let Some(end_rel) = author_section.find("</author>") else { break };
+        let end = start + end_rel + "</author>".len();
+        let block = &remainder[start..end];
+        if let Some(name) = extract_tag(block, "name") {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                authors.push(trimmed.to_string());
+            }
+        }
+        remainder = &remainder[end..];
+    }
+    authors
 }
 
 // Heuristics to detect unexpected payloads from the e-print endpoint
