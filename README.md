@@ -1,6 +1,10 @@
 # markxiv
 
-## Replace 'arxiv' in the URL with 'markxiv' to get the markdown.
+Just replace 'arxiv' in the URL with 'markxiv' to get the markdown
+
+https://arxiv.org/abs/1706.03762 → https://markxiv.org/abs/1706.03762
+
+## Basics
 
 A minimal web service that mimics arXiv but serves Markdown instead of PDFs/HTML.
 
