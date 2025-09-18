@@ -1,5 +1,7 @@
 # markxiv
 
+## Replace 'arxiv' in the URL with 'markxiv' to get the markdown.
+
 A minimal web service that mimics arXiv but serves Markdown instead of PDFs/HTML.
 
 Given an arXiv ID, the server:
