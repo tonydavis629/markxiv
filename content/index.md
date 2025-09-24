@@ -1,11 +1,17 @@
-## markxiv.org serves Markdown versions of arXiv papers
+# markxiv.org
 
-## Simply replace the 'arxiv' in an arXiv URL with 'markxiv' to get the Markdown version
+Markdown formatted arxiv papers
 
-## Not all papers can be converted; PDF-only papers return a 422 error with body "PDF only"
+## How it works
+Simply replace the 'arxiv' in an arXiv URL with 'markxiv' to get the Markdown version
 
-## This service is [free and open source](https://github.com/tonydavis629/markxiv)
+### `arxiv.org/abs/1234.56789` `==>` `markxiv.org/abs/1234.56789`
 
-## Consider donating via [GitHub Sponsors](https://github.com/sponsors/tonydavis629)
+## Free and [Open Source](https://github.com/tonydavis629/markxiv)
 
-## Made with ❤️ by [Tony Davis](https://tonyd.co)
+## Support 
+- [GitHub Sponsors](https://github.com/sponsors/tonydavis629)
+- Bitcoin: `bc1q37dt5h898chazzsmudxusukuts0sl5c4zx755g`
+- Monero: `846uyz3sTjfPYBTJko7NsFQQveX5nB1L3jQ2btV1shiRQ6HBDJ84Pxg25VdNz1PULMR7EUsHDMebuB8KHCd3FNov75FR79y`
+
+Made with ❤️ by [Tony Davis](https://tonyd.co)

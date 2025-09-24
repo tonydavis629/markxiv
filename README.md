@@ -12,9 +12,10 @@ Given an arXiv ID, the server:
 - Checks a local LRU cache for a converted result
 - Fetches the paper’s LaTeX source from arXiv (if available)
 - Extracts the archive, picks the main `.tex` file, converts it to Markdown using pandoc
+- Falls back to `pdftotext` when LaTeX sources are unavailable or pandoc conversion fails
 - Returns `text/markdown; charset=utf-8`
 
-If a paper is PDF-only (no source available), the server returns `422 Unprocessable Entity` with body `PDF only`.
+If a paper is PDF-only (no source available) or pandoc conversion fails, the server falls back to `pdftotext` and returns the extracted Markdown/plain text when that succeeds.
 
 Returned Markdown includes the paper title and abstract prepended at the top.
 
@@ -22,6 +23,7 @@ Returned Markdown includes the paper title and abstract prepended at the top.
 
 - Rust toolchain (`cargo`, `rustc`) via rustup
 - pandoc (for LaTeX → Markdown conversion)
+- pdftotext (Poppler CLI, usually packaged as `poppler-utils`)
 - tar (for extracting the arXiv source archive)
 
 Most Linux/macOS environments already include `tar`. Windows 10+ includes `bsdtar` as `tar`.
@@ -56,24 +58,26 @@ rustup-init
 - Debian/Ubuntu:
   ```bash
   sudo apt-get update
-  sudo apt-get install -y pandoc tar
+  sudo apt-get install -y pandoc poppler-utils tar
   ```
 - Fedora:
   ```bash
-  sudo dnf install -y pandoc tar
+  sudo dnf install -y pandoc poppler-utils tar
   ```
 - Arch:
   ```bash
-  sudo pacman -S pandoc tar
+  sudo pacman -S pandoc poppler-utils tar
   ```
 - Windows:
-  - Chocolatey: `choco install pandoc`
-  - Scoop: `scoop install pandoc`
+  - Chocolatey: `choco install pandoc poppler`
+  - Scoop (main bucket): `scoop install pandoc poppler`
+  - Manual binaries: https://blog.alivate.com.au/poppler-windows/
   - MSI installers: https://pandoc.org/installing.html
 
 Verify:
 ```bash
 pandoc --version
+pdftotext -v
 ```
 
 ## Build and Run
@@ -104,10 +108,12 @@ Environment variables:
   - `?refresh=1` bypasses the cache and re-fetches/convert
   - Response is pure Markdown, prefixed by `# {title}` and a `##Abstract` section containing the abstract text
   - Two-tier caching: in-memory LRU first, then on-disk gzip store; cache populated on miss
+- `GET /pdf/:id[?refresh=1]` → same response as `/abs/:id`, useful for links that expect the `/pdf/` prefix
+  - Requests like `/pdf/:id.pdf` are normalized automatically
 
 Error mapping:
 - `404 Not Found` — unknown arXiv id
-- `422 Unprocessable Entity` — PDF only (no e-print source)
+- `422 Unprocessable Entity` — PDF only (no e-print source) and the `pdftotext` fallback also failed
 - `502 Bad Gateway` — upstream/network error contacting arXiv
 - `500 Internal Server Error` — conversion/extraction errors
 
@@ -120,7 +126,7 @@ cargo test
 
 Project layout:
 - `src/main.rs` — server bootstrap
-- `src/routes.rs` — handlers (`/`, `/health`, `/abs/:id`)
+- `src/routes.rs` — handlers (`/`, `/health`, `/abs/:id`, `/pdf/:id`)
 - `src/state.rs` — shared state (LRU cache + clients)
 - `src/cache.rs` — thin wrapper around `lru::LruCache`
 - `src/arxiv.rs` — arXiv client + metadata fetch via Atom API
@@ -132,6 +138,7 @@ Project layout:
 - Metadata (title, abstract): `https://export.arxiv.org/api/query?id_list=:id` (Atom feed), minimal parse of `<entry><title>` and `<summary>`.
 - Source archive: `https://arxiv.org/e-print/:id` (tar/tar.gz). 400/403/404 → treated as PDF-only.
 - Conversion: save archive to temp dir → extract with `tar` → pick main `.tex` → `pandoc -f latex -t gfm` → sanitize.
+- Fallback: when LaTeX sources are unavailable or pandoc fails, download the PDF and shell out to `pdftotext -raw`.
 - Sanitization: remove entire `<figure>...</figure>` blocks and strip all remaining HTML tags from the Markdown output.
 - Caching: small in-memory LRU for hot entries, plus an on-disk gzip store with size cap and background sweeper that deletes oldest files when over cap.
 
