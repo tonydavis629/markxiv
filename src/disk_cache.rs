@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use filetime::{set_file_mtime, FileTime};
 use flate2::read::{GzDecoder, GzEncoder};
 use flate2::Compression;
-use filetime::{set_file_mtime, FileTime};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -27,7 +27,10 @@ impl DiskCache {
     pub async fn new(cfg: DiskCacheConfig) -> io::Result<Arc<Self>> {
         tokio::fs::create_dir_all(&cfg.root).await?;
         let size = initial_size(&cfg.root).await.unwrap_or(0);
-        let me = Arc::new(Self { cfg, size_bytes: Arc::new(Mutex::new(size)) });
+        let me = Arc::new(Self {
+            cfg,
+            size_bytes: Arc::new(Mutex::new(size)),
+        });
         if me.cfg.cap_bytes > 0 {
             Self::spawn_sweeper(me.clone());
         }
@@ -49,7 +52,9 @@ impl DiskCache {
     pub async fn get(&self, key: &str) -> io::Result<Option<String>> {
         let path = self.path_for(key);
         let Some(p) = path else { return Ok(None) };
-        if !p.exists() { return Ok(None) }
+        if !p.exists() {
+            return Ok(None);
+        }
         // read and decompress
         let gz = match tokio::fs::read(&p).await {
             Ok(b) => b,
@@ -61,18 +66,24 @@ impl DiskCache {
         let mut dec = GzDecoder::new(&gz[..]);
         let mut s = String::new();
         use std::io::Read;
-        dec.read_to_string(&mut s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        dec.read_to_string(&mut s)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(Some(s))
     }
 
     pub async fn put(&self, key: &str, value: &str) -> io::Result<()> {
-        let Some(path) = self.path_for(key) else { return Ok(()) };
-        if let Some(parent) = path.parent() { tokio::fs::create_dir_all(parent).await?; }
+        let Some(path) = self.path_for(key) else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
         // compress
         let mut enc = GzEncoder::new(value.as_bytes(), Compression::default());
         let mut buf = Vec::new();
         use std::io::Read;
-        enc.read_to_end(&mut buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        enc.read_to_end(&mut buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         // write atomically
         let tmp = path.with_extension("tmp");
         tokio::fs::write(&tmp, &buf).await?;
@@ -86,9 +97,13 @@ impl DiskCache {
     }
 
     async fn enforce_cap(&self) -> io::Result<()> {
-        if self.cfg.cap_bytes == 0 { return Ok(()) }
+        if self.cfg.cap_bytes == 0 {
+            return Ok(());
+        }
         let mut size = *self.size_bytes.lock().await;
-        if size <= self.cfg.cap_bytes { return Ok(()) }
+        if size <= self.cfg.cap_bytes {
+            return Ok(());
+        }
         // collect files with mtime
         let mut entries = Vec::new();
         collect_files(&self.cfg.root, &mut entries).await?;
@@ -118,7 +133,12 @@ impl DiskCache {
         let a = ((h >> 56) & 0xff) as u8;
         let b = ((h >> 48) & 0xff) as u8;
         let file = sanitize_filename(key);
-        let path = self.cfg.root.join(format!("{:02x}", a)).join(format!("{:02x}", b)).join(format!("{}.md.gz", file));
+        let path = self
+            .cfg
+            .root
+            .join(format!("{:02x}", a))
+            .join(format!("{:02x}", b))
+            .join(format!("{}.md.gz", file));
         Some(path)
     }
 }
@@ -198,7 +218,11 @@ mod tests {
     #[tokio::test]
     async fn put_get_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("mk-dc-{}", uuid()));
-        let cfg = DiskCacheConfig { root: tmp.clone(), cap_bytes: 10_000_000, sweep_interval: Duration::from_secs(3600) };
+        let cfg = DiskCacheConfig {
+            root: tmp.clone(),
+            cap_bytes: 10_000_000,
+            sweep_interval: Duration::from_secs(3600),
+        };
         let dc = DiskCache::new(cfg).await.unwrap();
         dc.put("1234.5678", "hello world").await.unwrap();
         let got = dc.get("1234.5678").await.unwrap();
@@ -209,9 +233,15 @@ mod tests {
     #[tokio::test]
     async fn enforce_cap_deletes_oldest() {
         let tmp = std::env::temp_dir().join(format!("mk-dc-{}", uuid()));
-        let cfg = DiskCacheConfig { root: tmp.clone(), cap_bytes: 200, sweep_interval: Duration::from_secs(3600) };
+        let cfg = DiskCacheConfig {
+            root: tmp.clone(),
+            cap_bytes: 200,
+            sweep_interval: Duration::from_secs(3600),
+        };
         let dc = DiskCache::new(cfg).await.unwrap();
-        for i in 0..20 { let _ = dc.put(&format!("id{}", i), &"x".repeat(50)).await; }
+        for i in 0..20 {
+            let _ = dc.put(&format!("id{}", i), &"x".repeat(50)).await;
+        }
         // force enforcement now
         dc.enforce_cap().await.unwrap();
         // size under or equal cap
@@ -221,7 +251,10 @@ mod tests {
 
     fn uuid() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         format!("{:x}", nanos)
     }
 }

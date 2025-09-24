@@ -1,9 +1,12 @@
+use crate::tex_main::select_main_tex;
 use async_trait::async_trait;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use thiserror::Error;
-use std::{path::{Path, PathBuf}, time::Duration};
 use tokio::process::Command;
 use tokio::time::timeout;
-use crate::tex_main::select_main_tex;
 
 #[derive(Clone, Debug, Error)]
 pub enum ConvertError {
@@ -16,6 +19,7 @@ pub enum ConvertError {
 #[async_trait]
 pub trait Converter {
     async fn latex_tar_to_markdown(&self, _tar_bytes: &[u8]) -> Result<String, ConvertError>;
+    async fn pdf_to_markdown(&self, _pdf_bytes: &[u8]) -> Result<String, ConvertError>;
 }
 
 pub struct PandocConverter;
@@ -29,7 +33,9 @@ impl PandocConverter {
 #[async_trait]
 impl Converter for PandocConverter {
     async fn latex_tar_to_markdown(&self, tar_bytes: &[u8]) -> Result<String, ConvertError> {
-        let workdir = make_temp_dir().await.map_err(|e| ConvertError::Failed(format!("temp dir: {}", e)))?;
+        let workdir = make_temp_dir()
+            .await
+            .map_err(|e| ConvertError::Failed(format!("temp dir: {}", e)))?;
         let tar_path = workdir.join("source.tar");
         // write bytes to disk
         tokio::fs::write(&tar_path, tar_bytes)
@@ -38,12 +44,15 @@ impl Converter for PandocConverter {
 
         // extract: try plain tar, then gzip
         if let Err(e1) = extract_tar(&workdir, &tar_path, false).await {
-            extract_tar(&workdir, &tar_path, true).await
+            extract_tar(&workdir, &tar_path, true)
+                .await
                 .map_err(|e2| ConvertError::Failed(format!("extract: {}; fallback: {}", e1, e2)))?;
         }
 
         // Collect .tex files
-        let files = collect_tex_files(&workdir).await.map_err(|e| ConvertError::Failed(format!("scan: {}", e)))?;
+        let files = collect_tex_files(&workdir)
+            .await
+            .map_err(|e| ConvertError::Failed(format!("scan: {}", e)))?;
         let Some(main_tex) = select_main_tex(&files) else {
             cleanup(&workdir).await;
             return Err(ConvertError::Failed("no .tex files found".into()));
@@ -52,7 +61,10 @@ impl Converter for PandocConverter {
         // Run pandoc
         let pandoc = std::env::var("MARKXIV_PANDOC_PATH").unwrap_or_else(|_| "pandoc".into());
         let main_parent = main_tex.parent().unwrap_or(Path::new(&workdir));
-        let main_file = main_tex.file_name().and_then(|s| s.to_str()).ok_or_else(|| ConvertError::Failed("invalid main tex path".into()))?;
+        let main_file = main_tex
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| ConvertError::Failed("invalid main tex path".into()))?;
         let md_bytes = run_pandoc(&pandoc, main_parent, main_file).await?;
 
         // cleanup best-effort
@@ -61,6 +73,26 @@ impl Converter for PandocConverter {
         let mut md = String::from_utf8_lossy(&md_bytes).into_owned();
         md = sanitize_markdown(&md);
         Ok(md)
+    }
+
+    async fn pdf_to_markdown(&self, pdf_bytes: &[u8]) -> Result<String, ConvertError> {
+        let workdir = make_temp_dir()
+            .await
+            .map_err(|e| ConvertError::Failed(format!("temp dir: {}", e)))?;
+        let pdf_path = workdir.join("source.pdf");
+
+        tokio::fs::write(&pdf_path, pdf_bytes)
+            .await
+            .map_err(|e| ConvertError::Failed(format!("write pdf: {}", e)))?;
+
+        let pdftotext =
+            std::env::var("MARKXIV_PDFTOTEXT_PATH").unwrap_or_else(|_| "pdftotext".into());
+        let result = run_pdftotext(&pdftotext, &pdf_path).await;
+
+        cleanup(&workdir).await;
+
+        let text_bytes = result?;
+        Ok(String::from_utf8_lossy(&text_bytes).into_owned())
     }
 }
 
@@ -85,16 +117,25 @@ async fn make_temp_dir() -> io::Result<PathBuf> {
             Err(e) => return Err(e),
         }
     }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, "failed to create unique temp dir"))
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "failed to create unique temp dir",
+    ))
 }
 
 async fn extract_tar(workdir: &Path, tar_path: &Path, gzip: bool) -> io::Result<()> {
     let mut cmd = Command::new("tar");
     cmd.current_dir(workdir);
     if gzip {
-        cmd.args(["-x", "-z", "-f"]).arg(tar_path).args(["-C"]).arg(workdir);
+        cmd.args(["-x", "-z", "-f"])
+            .arg(tar_path)
+            .args(["-C"])
+            .arg(workdir);
     } else {
-        cmd.args(["-x", "-f"]).arg(tar_path).args(["-C"]).arg(workdir);
+        cmd.args(["-x", "-f"])
+            .arg(tar_path)
+            .args(["-C"])
+            .arg(workdir);
     }
     let out = timeout(Duration::from_secs(60), cmd.output())
         .await
@@ -103,7 +144,10 @@ async fn extract_tar(workdir: &Path, tar_path: &Path, gzip: bool) -> io::Result<
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(io::Error::new(io::ErrorKind::Other, format!("tar failed: {}", stderr)))
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("tar failed: {}", stderr),
+        ))
     }
 }
 
@@ -154,11 +198,31 @@ async fn cleanup(path: &Path) {
     let _ = tokio::fs::remove_dir_all(path).await;
 }
 
+async fn run_pdftotext(pdftotext: &str, pdf_path: &Path) -> Result<Vec<u8>, ConvertError> {
+    let mut cmd = Command::new(pdftotext);
+    cmd.arg("-raw").arg(pdf_path).arg("-");
+    let out = timeout(Duration::from_secs(60), cmd.output())
+        .await
+        .map_err(|_| ConvertError::Failed("pdftotext timed out".into()))
+        .and_then(|r| r.map_err(|e| ConvertError::Failed(format!("pdftotext spawn: {}", e))))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Err(ConvertError::Failed(format!(
+            "pdftotext failed: {}",
+            stderr
+        )))
+    }
+}
+
 fn sanitize_markdown(input: &str) -> String {
     // 1) Remove entire <figure ...>...</figure> blocks (with embedded pdfs)
     let mut out = input.to_string();
     loop {
-        let Some(start) = out.find("<figure") else { break };
+        let Some(start) = out.find("<figure") else {
+            break;
+        };
         if let Some(rel_end) = out[start..].find("</figure>") {
             let end = start + rel_end + "</figure>".len();
             out.replace_range(start..end, "");
@@ -190,7 +254,11 @@ fn strip_html_tags(input: &str) -> String {
                     in_tag = false;
                 }
             }
-            _ => if !in_tag { out.push(ch) },
+            _ => {
+                if !in_tag {
+                    out.push(ch)
+                }
+            }
         }
     }
     out
@@ -214,13 +282,30 @@ pub mod test_helpers {
     use super::*;
 
     pub struct MockConverter {
-        pub result: Result<String, ConvertError>,
+        pub latex_result: Result<String, ConvertError>,
+        pub pdf_result: Result<String, ConvertError>,
+    }
+
+    impl MockConverter {
+        pub fn new(
+            latex_result: Result<String, ConvertError>,
+            pdf_result: Result<String, ConvertError>,
+        ) -> Self {
+            Self {
+                latex_result,
+                pdf_result,
+            }
+        }
     }
 
     #[async_trait]
     impl Converter for MockConverter {
         async fn latex_tar_to_markdown(&self, _tar_bytes: &[u8]) -> Result<String, ConvertError> {
-            self.result.clone()
+            self.latex_result.clone()
+        }
+
+        async fn pdf_to_markdown(&self, _pdf_bytes: &[u8]) -> Result<String, ConvertError> {
+            self.pdf_result.clone()
         }
     }
 }

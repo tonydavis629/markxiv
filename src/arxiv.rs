@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
-use thiserror::Error;
 use reqwest::Url;
+use thiserror::Error;
 
 #[derive(Clone, Debug, Error)]
 pub enum ArxivError {
@@ -19,6 +19,7 @@ pub enum ArxivError {
 pub trait ArxivClient {
     async fn exists(&self, id: &str) -> Result<bool, ArxivError>;
     async fn get_source_archive(&self, id: &str) -> Result<Bytes, ArxivError>;
+    async fn get_pdf(&self, id: &str) -> Result<Bytes, ArxivError>;
     async fn get_metadata(&self, id: &str) -> Result<Metadata, ArxivError>;
 }
 
@@ -28,11 +29,11 @@ pub struct ReqwestArxivClient {
 
 impl ReqwestArxivClient {
     pub fn new() -> Self {
-            let http = reqwest::Client::builder()
-                .user_agent("markxiv/0.1 (+https://github.com/)")
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .expect("failed to build reqwest client");
+        let http = reqwest::Client::builder()
+            .user_agent("markxiv/0.1 (+https://github.com/)")
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("failed to build reqwest client");
         Self { http }
     }
 }
@@ -40,11 +41,8 @@ impl ReqwestArxivClient {
 #[async_trait]
 impl ArxivClient for ReqwestArxivClient {
     async fn exists(&self, id: &str) -> Result<bool, ArxivError> {
-        let url = Url::parse_with_params(
-            "https://export.arxiv.org/api/query",
-            &[("id_list", id)],
-        )
-        .map_err(|e| ArxivError::Network(e.to_string()))?;
+        let url = Url::parse_with_params("https://export.arxiv.org/api/query", &[("id_list", id)])
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
         let res = self
             .http
             .get(url)
@@ -71,7 +69,10 @@ impl ArxivClient for ReqwestArxivClient {
         let res = self
             .http
             .get(url)
-            .header(reqwest::header::ACCEPT, "application/x-eprint-tar, application/x-tar, application/octet-stream")
+            .header(
+                reqwest::header::ACCEPT,
+                "application/x-eprint-tar, application/x-tar, application/octet-stream",
+            )
             .send()
             .await
             .map_err(|e| ArxivError::Network(e.to_string()))?;
@@ -97,7 +98,9 @@ impl ArxivClient for ReqwestArxivClient {
             }
             // Some upstream issues (e.g., HTML error pages) can slip through as 200s
             if content_type.contains("text/html") || looks_like_html(&bytes) {
-                return Err(ArxivError::Network("arXiv returned HTML when requesting e-print".into()));
+                return Err(ArxivError::Network(
+                    "arXiv returned HTML when requesting e-print".into(),
+                ));
             }
             // Otherwise, assume it's an archive (tar or tar.gz). The converter will try both.
             return Ok(bytes);
@@ -106,15 +109,47 @@ impl ArxivClient for ReqwestArxivClient {
         if status.as_u16() == 400 || status.as_u16() == 403 || status.as_u16() == 404 {
             return Err(ArxivError::PdfOnly);
         }
-        Err(ArxivError::Network(format!("arXiv e-print HTTP {}", status)))
+        Err(ArxivError::Network(format!(
+            "arXiv e-print HTTP {}",
+            status
+        )))
+    }
+
+    async fn get_pdf(&self, id: &str) -> Result<Bytes, ArxivError> {
+        let url = format!("https://arxiv.org/pdf/{}.pdf", id);
+        let res = self
+            .http
+            .get(&url)
+            .header(reqwest::header::ACCEPT, "application/pdf")
+            .send()
+            .await
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
+
+        let status = res.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(ArxivError::NotFound);
+        }
+        if !status.is_success() {
+            return Err(ArxivError::Network(format!("arXiv pdf HTTP {}", status)));
+        }
+
+        let bytes = res
+            .bytes()
+            .await
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
+
+        if looks_like_pdf(&bytes) {
+            Ok(bytes)
+        } else {
+            Err(ArxivError::Network(
+                "unexpected non-PDF payload when requesting PDF".into(),
+            ))
+        }
     }
 
     async fn get_metadata(&self, id: &str) -> Result<Metadata, ArxivError> {
-        let url = Url::parse_with_params(
-            "https://export.arxiv.org/api/query",
-            &[("id_list", id)],
-        )
-        .map_err(|e| ArxivError::Network(e.to_string()))?;
+        let url = Url::parse_with_params("https://export.arxiv.org/api/query", &[("id_list", id)])
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
         let res = self
             .http
             .get(url)
@@ -152,9 +187,16 @@ fn parse_atom_metadata(atom: &str) -> Option<Metadata> {
     let entry_end_rel = atom[entry_start..].find("</entry>")?;
     let entry = &atom[entry_start..entry_start + entry_end_rel + "</entry>".len()];
     let title = extract_tag(entry, "title")?.trim().to_string();
-    let summary = extract_tag(entry, "summary").unwrap_or_default().trim().to_string();
+    let summary = extract_tag(entry, "summary")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let authors = extract_authors(entry);
-    Some(Metadata { title, summary, authors })
+    Some(Metadata {
+        title,
+        summary,
+        authors,
+    })
 }
 
 fn extract_tag(s: &str, tag: &str) -> Option<String> {
@@ -174,7 +216,9 @@ fn extract_authors(entry: &str) -> Vec<String> {
     let mut remainder = entry;
     while let Some(start) = remainder.find("<author") {
         let author_section = &remainder[start..];
-        let Some(end_rel) = author_section.find("</author>") else { break };
+        let Some(end_rel) = author_section.find("</author>") else {
+            break;
+        };
         let end = start + end_rel + "</author>".len();
         let block = &remainder[start..end];
         if let Some(name) = extract_tag(block, "name") {
@@ -197,9 +241,15 @@ fn looks_like_html(bytes: &[u8]) -> bool {
     // Look at the first 1024 bytes, trim leading whitespace, then match common HTML signatures
     let n = bytes.len().min(1024);
     let mut i = 0;
-    while i < n && matches!(bytes[i], b'\t' | b'\n' | b'\r' | b' ') { i += 1; }
-    if i >= n { return false; }
-    if bytes[i] != b'<' { return false; }
+    while i < n && matches!(bytes[i], b'\t' | b'\n' | b'\r' | b' ') {
+        i += 1;
+    }
+    if i >= n {
+        return false;
+    }
+    if bytes[i] != b'<' {
+        return false;
+    }
     let s = String::from_utf8_lossy(&bytes[i..n]).to_ascii_lowercase();
     s.starts_with("<!doctype html") || s.starts_with("<html")
 }
@@ -213,9 +263,11 @@ pub mod test_helpers {
     pub struct MockArxivClient {
         pub exists_response: Result<bool, ArxivError>,
         pub archive_response: Result<Bytes, ArxivError>,
+        pub pdf_response: Result<Bytes, ArxivError>,
         pub metadata_response: Result<Metadata, ArxivError>,
         pub exists_calls: Arc<AtomicUsize>,
         pub archive_calls: Arc<AtomicUsize>,
+        pub pdf_calls: Arc<AtomicUsize>,
         pub metadata_calls: Arc<AtomicUsize>,
     }
 
@@ -223,14 +275,17 @@ pub mod test_helpers {
         pub fn new(
             exists_response: Result<bool, ArxivError>,
             archive_response: Result<Bytes, ArxivError>,
+            pdf_response: Result<Bytes, ArxivError>,
             metadata_response: Result<Metadata, ArxivError>,
         ) -> Self {
             Self {
                 exists_response,
                 archive_response,
+                pdf_response,
                 metadata_response,
                 exists_calls: Arc::new(AtomicUsize::new(0)),
                 archive_calls: Arc::new(AtomicUsize::new(0)),
+                pdf_calls: Arc::new(AtomicUsize::new(0)),
                 metadata_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
@@ -246,6 +301,11 @@ pub mod test_helpers {
         async fn get_source_archive(&self, _id: &str) -> Result<Bytes, ArxivError> {
             self.archive_calls.fetch_add(1, Ordering::SeqCst);
             self.archive_response.clone()
+        }
+
+        async fn get_pdf(&self, _id: &str) -> Result<Bytes, ArxivError> {
+            self.pdf_calls.fetch_add(1, Ordering::SeqCst);
+            self.pdf_response.clone()
         }
 
         async fn get_metadata(&self, _id: &str) -> Result<Metadata, ArxivError> {

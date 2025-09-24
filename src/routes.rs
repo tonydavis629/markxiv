@@ -1,15 +1,28 @@
 use std::sync::Arc;
 
-use axum::{extract::{Path, RawQuery, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}};
+use axum::{
+    extract::{Path, RawQuery, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
 
-use crate::{arxiv::{ArxivClient, ArxivError, Metadata}, cache::MkCache, convert::{ConvertError, Converter}, disk_cache::DiskCache};
+use crate::{
+    arxiv::{ArxivClient, ArxivError, Metadata},
+    cache::MkCache,
+    convert::{ConvertError, Converter},
+    disk_cache::DiskCache,
+};
 use tokio::sync::Mutex;
 
 pub async fn index(headers: HeaderMap) -> Response {
     let path = std::env::var("MARKXIV_INDEX_MD").unwrap_or_else(|_| "content/index.md".to_string());
     match tokio::fs::read_to_string(&path).await {
         Ok(md) => {
-            let wants_html = wants_html(headers.get(axum::http::header::ACCEPT).and_then(|v| v.to_str().ok()));
+            let wants_html = wants_html(
+                headers
+                    .get(axum::http::header::ACCEPT)
+                    .and_then(|v| v.to_str().ok()),
+            );
             if wants_html {
                 let html = render_markdown_html(&md);
                 (
@@ -21,7 +34,10 @@ pub async fn index(headers: HeaderMap) -> Response {
             } else {
                 (
                     StatusCode::OK,
-                    [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/markdown; charset=utf-8",
+                    )],
                     md,
                 )
                     .into_response()
@@ -53,7 +69,8 @@ fn render_markdown_html(md: &str) -> String {
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     let parser = Parser::new_ext(md, opts);
-    let mut html_output = String::from("<!doctype html><meta charset=\"utf-8\"><title>markxiv</title><body>");
+    let mut html_output =
+        String::from("<!doctype html><meta charset=\"utf-8\"><title>markxiv</title><body>");
     html::push_html(&mut html_output, parser);
     html_output.push_str("</body>");
     html_output
@@ -89,7 +106,11 @@ pub async fn paper(
             let mut it = kv.splitn(2, '=');
             let k = it.next()?;
             let v = it.next().unwrap_or("");
-            if k == "refresh" && v == "1" { Some(()) } else { None }
+            if k == "refresh" && v == "1" {
+                Some(())
+            } else {
+                None
+            }
         })
         .is_some();
 
@@ -117,14 +138,22 @@ pub async fn paper(
         Err(e) => return map_arxiv_err(e),
     };
 
-    let tar_bytes = match client.get_source_archive(&id).await {
-        Ok(b) => b,
+    let body_md = match client.get_source_archive(&id).await {
+        Ok(bytes) => match converter.latex_tar_to_markdown(&bytes).await {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("pandoc conversion failed for {id}: {err}");
+                match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
+                    Ok(s) => s,
+                    Err(resp) => return resp,
+                }
+            }
+        },
+        Err(ArxivError::PdfOnly) => match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
+            Ok(s) => s,
+            Err(resp) => return resp,
+        },
         Err(e) => return map_arxiv_err(e),
-    };
-
-    let body_md = match converter.latex_tar_to_markdown(&tar_bytes).await {
-        Ok(s) => s,
-        Err(e) => return map_convert_err(e),
     };
 
     let final_md = if let Some(meta) = metadata {
@@ -155,7 +184,10 @@ fn normalize_id(raw: &str) -> &str {
 fn markdown_response(md: String) -> Response {
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
         md,
     )
         .into_response()
@@ -164,16 +196,37 @@ fn markdown_response(md: String) -> Response {
 fn map_arxiv_err(e: ArxivError) -> Response {
     match e {
         ArxivError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
-        ArxivError::PdfOnly => (StatusCode::UNPROCESSABLE_ENTITY, "Error: PDF only").into_response(),
+        ArxivError::PdfOnly => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "Error: PDF only").into_response()
+        }
         ArxivError::Network(msg) => (StatusCode::BAD_GATEWAY, msg).into_response(),
-        ArxivError::NotImplemented => (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response(),
+        ArxivError::NotImplemented => {
+            (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response()
+        }
     }
 }
 
 fn map_convert_err(e: ConvertError) -> Response {
     match e {
         ConvertError::Failed(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
-        ConvertError::NotImplemented => (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response(),
+        ConvertError::NotImplemented => {
+            (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response()
+        }
+    }
+}
+
+async fn pdf_fallback(
+    client: &(dyn ArxivClient + Send + Sync),
+    converter: &(dyn Converter + Send + Sync),
+    id: &str,
+) -> Result<String, Response> {
+    let pdf_bytes = match client.get_pdf(id).await {
+        Ok(b) => b,
+        Err(e) => return Err(map_arxiv_err(e)),
+    };
+    match converter.pdf_to_markdown(&pdf_bytes).await {
+        Ok(s) => Ok(s),
+        Err(e) => Err(map_convert_err(e)),
     }
 }
 
@@ -237,8 +290,8 @@ mod tests {
     use super::*;
     use axum::{routing::get, Router};
     use bytes::Bytes;
-    use tower::ServiceExt; // for `oneshot`
     use std::sync::atomic::Ordering;
+    use tower::ServiceExt; // for `oneshot`
 
     use crate::arxiv::test_helpers::MockArxivClient;
     use crate::convert::test_helpers::MockConverter;
@@ -252,15 +305,19 @@ mod tests {
             authors: vec!["Alice Example".into(), "Bob <i>Author</i>".into()],
         };
         let out = super::prepend_metadata(&meta, "Body");
-        assert!(out.starts_with("# Sample Title\n\n## Authors\nAlice Example, Bob Author\n\n##Abstract\nSample abstract\n\nBody"));
+        assert!(out.starts_with("# Sample Title\n\n## Authors\nAlice Example, Bob Author\n\n## Abstract\nSample abstract\n\nBody"));
     }
 
     #[tokio::test]
     async fn health_ok() {
         let app = Router::new().route("/health", get(super::health));
         let res = app
-            .oneshot(axum::http::Request::builder().uri("/health").body(axum::body::Body::empty())
-            .unwrap())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -272,9 +329,14 @@ mod tests {
         let tar = Bytes::from_static(b"tar-bytes");
         let md = "# Hello".to_string();
 
-        let meta = Metadata { title: "Sample Title".into(), summary: "Sample abstract".into(), authors: vec!["First Author".into(), "Second Author".into()] };
-        let client = MockArxivClient::new(Ok(true), Ok(tar), Ok(meta));
-        let converter = MockConverter { result: Ok(md.clone()) };
+        let meta = Metadata {
+            title: "Sample Title".into(),
+            summary: "Sample abstract".into(),
+            authors: vec!["First Author".into(), "Second Author".into()],
+        };
+        let client =
+            MockArxivClient::new(Ok(true), Ok(tar), Err(ArxivError::NotImplemented), Ok(meta));
+        let converter = MockConverter::new(Ok(md.clone()), Ok(md.clone()));
         let state = AppState::new(8, client, converter, None);
 
         let app = Router::new()
@@ -313,11 +375,16 @@ mod tests {
         let tar = Bytes::from_static(b"tar-bytes");
         let md = "# Hello".to_string();
 
-        let meta = Metadata { title: "Sample Title".into(), summary: "Sample abstract".into(), authors: Vec::new() };
-        let client = MockArxivClient::new(Ok(true), Ok(tar), Ok(meta));
+        let meta = Metadata {
+            title: "Sample Title".into(),
+            summary: "Sample abstract".into(),
+            authors: Vec::new(),
+        };
+        let client =
+            MockArxivClient::new(Ok(true), Ok(tar), Err(ArxivError::NotImplemented), Ok(meta));
         let metadata_calls = client.metadata_calls.clone();
         let archive_calls = client.archive_calls.clone();
-        let converter = MockConverter { result: Ok(md.clone()) };
+        let converter = MockConverter::new(Ok(md.clone()), Ok(md.clone()));
         let state = AppState::new(8, client, converter, None);
 
         let app = Router::new()
@@ -354,10 +421,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pdf_only_maps_to_422() {
+    async fn pdf_only_falls_back_to_pdftotext() {
         let id = "1234.5678";
-        let client = MockArxivClient::new(Ok(true), Err(ArxivError::PdfOnly), Ok(Metadata { title: String::new(), summary: String::new(), authors: Vec::new() }));
-        let converter = MockConverter { result: Ok("".into()) };
+        let client = MockArxivClient::new(
+            Ok(true),
+            Err(ArxivError::PdfOnly),
+            Ok(Bytes::from_static(b"pdf-bytes")),
+            Ok(Metadata {
+                title: String::new(),
+                summary: String::new(),
+                authors: Vec::new(),
+            }),
+        );
+        let pdf_calls = client.pdf_calls.clone();
+        let archive_calls = client.archive_calls.clone();
+        let converter = MockConverter::new(Ok(String::new()), Ok("pdf text".into()));
         let state = AppState::new(8, client, converter, None);
 
         let app = Router::new()
@@ -373,13 +451,24 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(pdf_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
     async fn invalid_id_400() {
-        let client = MockArxivClient::new(Ok(true), Err(ArxivError::PdfOnly), Ok(Metadata { title: String::new(), summary: String::new(), authors: Vec::new() }));
-        let converter = MockConverter { result: Ok("".into()) };
+        let client = MockArxivClient::new(
+            Ok(true),
+            Err(ArxivError::PdfOnly),
+            Err(ArxivError::NotImplemented),
+            Ok(Metadata {
+                title: String::new(),
+                summary: String::new(),
+                authors: Vec::new(),
+            }),
+        );
+        let converter = MockConverter::new(Ok(String::new()), Ok(String::new()));
         let state = AppState::new(8, client, converter, None);
 
         let app = Router::new()
