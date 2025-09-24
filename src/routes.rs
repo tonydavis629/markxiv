@@ -138,25 +138,29 @@ pub async fn paper(
         Err(e) => return map_arxiv_err(e),
     };
 
-    let body_md = match client.get_source_archive(&id).await {
+    let (body_md, skip_metadata) = match client.get_source_archive(&id).await {
         Ok(bytes) => match converter.latex_tar_to_markdown(&bytes).await {
-            Ok(s) => s,
+            Ok(s) => (s, false),
             Err(err) => {
                 eprintln!("pandoc conversion failed for {id}: {err}");
                 match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
-                    Ok(s) => s,
+                    Ok(s) => (s, true),
                     Err(resp) => return resp,
                 }
             }
         },
-        Err(ArxivError::PdfOnly) => match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
-            Ok(s) => s,
-            Err(resp) => return resp,
-        },
+        Err(ArxivError::PdfOnly) => {
+            match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
+                Ok(s) => (s, true),
+                Err(resp) => return resp,
+            }
+        }
         Err(e) => return map_arxiv_err(e),
     };
 
-    let final_md = if let Some(meta) = metadata {
+    let final_md = if skip_metadata {
+        body_md
+    } else if let Some(meta) = metadata {
         prepend_metadata(&meta, &body_md)
     } else {
         body_md
@@ -288,7 +292,7 @@ fn prepend_metadata(meta: &Metadata, body_md: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::get, Router};
+    use axum::{body::to_bytes, routing::get, Router};
     use bytes::Bytes;
     use std::sync::atomic::Ordering;
     use tower::ServiceExt; // for `oneshot`
@@ -428,9 +432,9 @@ mod tests {
             Err(ArxivError::PdfOnly),
             Ok(Bytes::from_static(b"pdf-bytes")),
             Ok(Metadata {
-                title: String::new(),
-                summary: String::new(),
-                authors: Vec::new(),
+                title: "Sample Title".into(),
+                summary: "Sample abstract".into(),
+                authors: vec!["Author One".into()],
             }),
         );
         let pdf_calls = client.pdf_calls.clone();
@@ -451,7 +455,53 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        let status = res.status();
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_ref(), b"pdf text");
+        assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(pdf_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pandoc_failure_falls_back_to_pdftotext() {
+        let id = "1234.5678";
+        let tar = Bytes::from_static(b"tar-bytes");
+        let client = MockArxivClient::new(
+            Ok(true),
+            Ok(tar),
+            Ok(Bytes::from_static(b"pdf-bytes")),
+            Ok(Metadata {
+                title: "Sample Title".into(),
+                summary: "Sample abstract".into(),
+                authors: vec!["Author One".into()],
+            }),
+        );
+        let pdf_calls = client.pdf_calls.clone();
+        let archive_calls = client.archive_calls.clone();
+        let converter = MockConverter::new(
+            Err(ConvertError::Failed("pandoc failed".into())),
+            Ok("pdf text".into()),
+        );
+        let state = AppState::new(8, client, converter, None);
+
+        let app = Router::new()
+            .route("/abs/:id", get(super::paper))
+            .with_state(state);
+
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/abs/{}", id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_ref(), b"pdf text");
         assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
         assert_eq!(pdf_calls.load(Ordering::SeqCst), 1);
     }
