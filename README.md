@@ -49,11 +49,11 @@ brew install rustup
 rustup-init
 ```
 
-## Install pandoc
+## Install pandoc and pdftotext
 
 - macOS (Homebrew):
   ```bash
-  brew install pandoc
+  brew install pandoc poppler
   ```
 - Debian/Ubuntu:
   ```bash

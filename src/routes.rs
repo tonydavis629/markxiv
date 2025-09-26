@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, RawQuery, State},
+    extract::{OriginalUri, Path, RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -86,10 +86,14 @@ pub async fn paper(
     State(converter): State<Arc<dyn Converter + Send + Sync>>,
     State(disk): State<Option<Arc<DiskCache>>>,
     Path(raw_id): Path<String>,
+    original_uri: OriginalUri,
     raw_query: Option<RawQuery>,
 ) -> Response {
     let trimmed = raw_id.trim();
     let normalized = normalize_id(trimmed);
+
+    let original_path = original_uri.path().to_string();
+    let canonical_path = format!("/abs/{}", normalized);
 
     // Minimal id validation: non-empty and ascii
     if normalized.is_empty() || !normalized.is_ascii() {
@@ -97,6 +101,7 @@ pub async fn paper(
     }
 
     let id = normalized.to_string();
+    let cache_key = canonical_path.clone();
 
     let refresh = raw_query
         .and_then(|q| q.0)
@@ -115,14 +120,14 @@ pub async fn paper(
         .is_some();
 
     if !refresh {
-        if let Some(md) = cache.lock().await.get(&id) {
-            return markdown_response(md);
+        if let Some(md) = cache.lock().await.get(&cache_key) {
+            return markdown_response(md, &original_path);
         }
         if let Some(dc) = &disk {
-            match dc.get(&id).await {
+            match dc.get(&cache_key).await {
                 Ok(Some(md)) => {
-                    cache.lock().await.put(id.clone(), md.clone());
-                    return markdown_response(md);
+                    cache.lock().await.put(cache_key.clone(), md.clone());
+                    return markdown_response(md, &original_path);
                 }
                 Ok(None) => {}
                 Err(e) => eprintln!("disk cache read error: {}", e),
@@ -166,13 +171,13 @@ pub async fn paper(
         body_md
     };
 
-    cache.lock().await.put(id.clone(), final_md.clone());
+    cache.lock().await.put(cache_key.clone(), final_md.clone());
     if let Some(dc) = &disk {
-        if let Err(e) = dc.put(&id, &final_md).await {
+        if let Err(e) = dc.put(&cache_key, &final_md).await {
             eprintln!("disk cache write error: {}", e);
         }
     }
-    markdown_response(final_md)
+    markdown_response(final_md, &original_path)
 }
 
 fn normalize_id(raw: &str) -> &str {
@@ -185,16 +190,16 @@ fn normalize_id(raw: &str) -> &str {
     raw
 }
 
-fn markdown_response(md: String) -> Response {
-    (
-        StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/markdown; charset=utf-8",
-        )],
-        md,
-    )
-        .into_response()
+fn markdown_response(md: String, content_location: &str) -> Response {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    if let Ok(val) = axum::http::HeaderValue::from_str(content_location) {
+        headers.insert(axum::http::header::CONTENT_LOCATION, val);
+    }
+    (StatusCode::OK, headers, md).into_response()
 }
 
 fn map_arxiv_err(e: ArxivError) -> Response {
@@ -359,6 +364,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+        let cl = res
+            .headers()
+            .get(axum::http::header::CONTENT_LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cl, format!("/abs/{}", id));
 
         // Second request should hit cache and still be OK
         let res2 = app
@@ -371,6 +383,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res2.status(), StatusCode::OK);
+        let cl2 = res2
+            .headers()
+            .get(axum::http::header::CONTENT_LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cl2, format!("/abs/{}", id));
     }
 
     #[tokio::test]
@@ -407,6 +426,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+        let cl = res
+            .headers()
+            .get(axum::http::header::CONTENT_LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cl, format!("/pdf/{}.pdf", id));
         assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
         assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
 
@@ -420,6 +446,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res2.status(), StatusCode::OK);
+        let cl2 = res2
+            .headers()
+            .get(axum::http::header::CONTENT_LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cl2, format!("/abs/{}", id));
+        assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pdf_route_without_suffix_shares_cache_and_sets_header() {
+        let id = "1234.5678";
+        let tar = Bytes::from_static(b"tar-bytes");
+        let md = "# Hello".to_string();
+
+        let meta = Metadata {
+            title: "Sample Title".into(),
+            summary: "Sample abstract".into(),
+            authors: Vec::new(),
+        };
+        let client =
+            MockArxivClient::new(Ok(true), Ok(tar), Err(ArxivError::NotImplemented), Ok(meta));
+        let metadata_calls = client.metadata_calls.clone();
+        let archive_calls = client.archive_calls.clone();
+        let converter = MockConverter::new(Ok(md.clone()), Ok(md.clone()));
+        let state = AppState::new(8, client, converter, None);
+
+        let app = Router::new()
+            .route("/abs/:id", get(super::paper))
+            .route("/pdf/:id", get(super::paper))
+            .with_state(state);
+
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/pdf/{}", id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cl = res
+            .headers()
+            .get(axum::http::header::CONTENT_LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cl, format!("/pdf/{}", id));
+        assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
+
+        let res2 = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/abs/{}", id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res2.status(), StatusCode::OK);
+        let cl2 = res2
+            .headers()
+            .get(axum::http::header::CONTENT_LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cl2, format!("/abs/{}", id));
         assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
         assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
     }
