@@ -201,7 +201,7 @@ async fn cleanup(path: &Path) {
 async fn run_pdftotext(pdftotext: &str, pdf_path: &Path) -> Result<Vec<u8>, ConvertError> {
     let mut cmd = Command::new(pdftotext);
     cmd.arg("-raw").arg(pdf_path).arg("-");
-    let out = timeout(Duration::from_secs(60), cmd.output())
+    let out = timeout(Duration::from_secs(300), cmd.output())
         .await
         .map_err(|_| ConvertError::Failed("pdftotext timed out".into()))
         .and_then(|r| r.map_err(|e| ConvertError::Failed(format!("pdftotext spawn: {}", e))))?;
