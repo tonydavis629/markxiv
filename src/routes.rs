@@ -130,7 +130,7 @@ pub async fn paper(
                     return markdown_response(md, &original_path);
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("disk cache read error: {}", e),
+                Err(e) => tracing::error!(error = %e, "disk cache read error"),
             }
         }
     }
@@ -138,9 +138,13 @@ pub async fn paper(
     // Fetch metadata (title, abstract). If not implemented, continue without them.
     let metadata = match client.get_metadata(&id).await {
         Ok(m) => Some(m),
-        Err(ArxivError::NotFound) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(err @ ArxivError::NotFound) => {
+            return map_arxiv_err("metadata", &id, err);
+        }
         Err(ArxivError::NotImplemented) => None,
-        Err(e) => return map_arxiv_err(e),
+        Err(err) => {
+            return map_arxiv_err("metadata", &id, err);
+        }
     };
 
     let (body_md, skip_metadata) = match client.get_source_archive(&id).await {
@@ -151,13 +155,14 @@ pub async fn paper(
                 Err(resp) => return resp,
             },
         },
-        Err(ArxivError::PdfOnly) => {
+        Err(_err @ ArxivError::PdfOnly) => {
+            tracing::warn!(paper_id = %id, context = "source_archive", "arXiv reported PDF-only");
             match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
                 Ok(s) => (s, true),
                 Err(resp) => return resp,
             }
         }
-        Err(e) => return map_arxiv_err(e),
+        Err(err) => return map_arxiv_err("source_archive", &id, err),
     };
 
     let final_md = if skip_metadata {
@@ -171,7 +176,7 @@ pub async fn paper(
     cache.lock().await.put(cache_key.clone(), final_md.clone());
     if let Some(dc) = &disk {
         if let Err(e) = dc.put(&cache_key, &final_md).await {
-            eprintln!("disk cache write error: {}", e);
+            tracing::error!(error = %e, "disk cache write error");
         }
     }
     markdown_response(final_md, &original_path)
@@ -199,23 +204,35 @@ fn markdown_response(md: String, content_location: &str) -> Response {
     (StatusCode::OK, headers, md).into_response()
 }
 
-fn map_arxiv_err(e: ArxivError) -> Response {
+fn map_arxiv_err(context: &str, id: &str, e: ArxivError) -> Response {
     match e {
-        ArxivError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
+        ArxivError::NotFound => {
+            tracing::warn!(paper_id = %id, context = %context, "arXiv resource not found");
+            (StatusCode::NOT_FOUND, "not found").into_response()
+        }
         ArxivError::PdfOnly => {
+            tracing::warn!(paper_id = %id, context = %context, "arXiv provided PDF-only asset");
             (StatusCode::UNPROCESSABLE_ENTITY, "Error: PDF only").into_response()
         }
-        ArxivError::Network(msg) => (StatusCode::BAD_GATEWAY, msg).into_response(),
+        ArxivError::Network(msg) => {
+            tracing::error!(paper_id = %id, context = %context, error = %msg, "arXiv network error");
+            (StatusCode::BAD_GATEWAY, msg).into_response()
+        }
         ArxivError::NotImplemented => {
+            tracing::warn!(paper_id = %id, context = %context, "arXiv feature not implemented");
             (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response()
         }
     }
 }
 
-fn map_convert_err(e: ConvertError) -> Response {
+fn map_convert_err(context: &str, id: &str, e: ConvertError) -> Response {
     match e {
-        ConvertError::Failed(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+        ConvertError::Failed(msg) => {
+            tracing::error!(paper_id = %id, context = %context, error = %msg, "conversion failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+        }
         ConvertError::NotImplemented => {
+            tracing::warn!(paper_id = %id, context = %context, "conversion not implemented");
             (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response()
         }
     }
@@ -228,11 +245,11 @@ async fn pdf_fallback(
 ) -> Result<String, Response> {
     let pdf_bytes = match client.get_pdf(id).await {
         Ok(b) => b,
-        Err(e) => return Err(map_arxiv_err(e)),
+        Err(err) => return Err(map_arxiv_err("pdf_fallback:get_pdf", id, err)),
     };
     match converter.pdf_to_markdown(&pdf_bytes).await {
         Ok(s) => Ok(s),
-        Err(e) => Err(map_convert_err(e)),
+        Err(err) => Err(map_convert_err("pdf_fallback:pdf_to_markdown", id, err)),
     }
 }
 
@@ -247,13 +264,18 @@ async fn convert_latex_with_retries(
             Ok(md) => return Ok(md),
             Err(err) => {
                 if attempt < MAX_ATTEMPTS {
-                    eprintln!(
-                        "pandoc conversion attempt {} failed for {}: {}; retrying",
-                        attempt, id, err
+                    tracing::warn!(
+                        attempt,
+                        paper_id = %id,
+                        error = %err,
+                        "pandoc conversion attempt failed; retrying"
                     );
                 } else {
-                    eprintln!(
-                        "pandoc conversion failed for {id} after {attempt} attempt(s): {err}"
+                    tracing::error!(
+                        attempts = attempt,
+                        paper_id = %id,
+                        error = %err,
+                        "pandoc conversion failed after retries"
                     );
                     return Err(err);
                 }

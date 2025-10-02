@@ -43,7 +43,7 @@ impl DiskCache {
             loop {
                 tokio::time::sleep(interval).await;
                 if let Err(e) = me.enforce_cap().await {
-                    eprintln!("[disk_cache] sweep error: {}", e);
+                    tracing::error!(error = %e, "disk cache sweep error");
                 }
             }
         });

@@ -14,6 +14,10 @@ async-trait = "0.1"
 pulldown-cmark = "0.10"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 filetime = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
+tower-http = { version = "0.5", features = ["trace"] }
 
 [dev-dependencies]
 tower = "0.5"
