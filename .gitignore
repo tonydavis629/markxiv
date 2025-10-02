@@ -4,3 +4,4 @@ infra
 cache
 scripts
 .env
+logs
