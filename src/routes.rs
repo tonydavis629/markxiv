@@ -260,15 +260,31 @@ async fn convert_latex_with_retries(
 ) -> Result<String, ConvertError> {
     const MAX_ATTEMPTS: usize = 4; // initial try + up to 3 retries
     for attempt in 1..=MAX_ATTEMPTS {
+        if attempt > 1 {
+            tracing::info!(
+                attempt,
+                paper_id = %id,
+                "retrying pandoc conversion"
+            );
+        }
         match converter.latex_tar_to_markdown(tar_bytes).await {
-            Ok(md) => return Ok(md),
+            Ok(md) => {
+                if attempt > 1 {
+                    tracing::info!(
+                        attempt,
+                        paper_id = %id,
+                        "pandoc conversion succeeded after retry"
+                    );
+                }
+                return Ok(md);
+            }
             Err(err) => {
                 if attempt < MAX_ATTEMPTS {
                     tracing::warn!(
                         attempt,
                         paper_id = %id,
                         error = %err,
-                        "pandoc conversion attempt failed; retrying"
+                        "pandoc conversion attempt failed"
                     );
                 } else {
                     tracing::error!(

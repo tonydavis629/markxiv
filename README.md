@@ -97,6 +97,8 @@ Environment variables:
 - `MARKXIV_CACHE_DIR` (default `./cache`) — on-disk cache root directory
 - `MARKXIV_DISK_CACHE_CAP_BYTES` (default `0`) — on-disk cache size cap in bytes (0 disables disk cache)
 - `MARKXIV_SWEEP_INTERVAL_SECS` (default `600`) — background sweeper interval seconds
+- `MARKXIV_LOG_PATH` — optional absolute or relative path to the log file; takes precedence over `MARKXIV_LOG_DIR`
+- `MARKXIV_LOG_DIR` (default `./logs`) — directory used when `MARKXIV_LOG_PATH` is unset; file name defaults to `markxiv.log`
 
 ## Endpoints
 
@@ -169,5 +171,13 @@ MARKXIV_DISK_CACHE_CAP_BYTES=$((10*1024*1024*1024)) cargo run
 - Conversion fidelity depends on pandoc and the paper’s LaTeX structure; complex macros/environments may not convert perfectly.
 - Title and abstract are prepended to the Markdown as `# Title` and a `##Abstract` heading followed by the abstract.
 - HTML is stripped from the final Markdown; embedded PDF figures are removed.
-- Caching is in-memory only; restart clears cache.
+- Caching is in-memory and optional on-disk; restart clears the in-memory cache.
 - For production use, consider timeouts, rate limiting, and persistent caching.
+
+## Logging
+
+- By default the server writes structured request/error logs to `./logs/markxiv.log`; ensure the process user can create that directory.
+- Override the location with `MARKXIV_LOG_PATH=/abs/path/to/markxiv.log` or `MARKXIV_LOG_DIR=/var/log/markxiv` (generates `/var/log/markxiv/markxiv.log`).
+- If the file cannot be opened (e.g., missing write permissions), logging automatically falls back to stderr/journald.
+- When running under systemd, confirm the service `User`/`Group` owns or can write to the configured log directory, e.g. `sudo chown -R markxiv:markxiv /var/log/markxiv`.
+- Quick check: verify the service account can write to the cache (or any target directory) via `sudo -u markxiv test -w /mnt/markxiv-cache && echo writable`.
