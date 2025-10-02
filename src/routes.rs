@@ -176,7 +176,7 @@ pub async fn paper(
     cache.lock().await.put(cache_key.clone(), final_md.clone());
     if let Some(dc) = &disk {
         if let Err(e) = dc.put(&cache_key, &final_md).await {
-            tracing::error!(error = %e, "disk cache write error");
+            tracing::error!(error = %e, cache_key = %cache_key, "disk cache write error");
         }
     }
     markdown_response(final_md, &original_path)

@@ -76,7 +76,15 @@ impl DiskCache {
             return Ok(());
         };
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "create_dir_all {} for key {} failed: {}",
+                        parent.display(), key, e
+                    ),
+                )
+            })?;
         }
         // compress
         let mut enc = GzEncoder::new(value.as_bytes(), Compression::default());
@@ -86,8 +94,18 @@ impl DiskCache {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         // write atomically
         let tmp = path.with_extension("tmp");
-        tokio::fs::write(&tmp, &buf).await?;
-        tokio::fs::rename(&tmp, &path).await?;
+        tokio::fs::write(&tmp, &buf).await.map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("write temp {} for key {} failed: {}", tmp.display(), key, e),
+            )
+        })?;
+        tokio::fs::rename(&tmp, &path).await.map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("rename {} -> {} for key {} failed: {}", tmp.display(), path.display(), key, e),
+            )
+        })?;
         // update size counter
         let mut size = self.size_bytes.lock().await;
         *size = size.saturating_add(buf.len() as u64);
