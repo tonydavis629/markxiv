@@ -280,10 +280,14 @@ mod sanitize_tests {
 #[cfg(test)]
 pub mod test_helpers {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     pub struct MockConverter {
         pub latex_result: Result<String, ConvertError>,
         pub pdf_result: Result<String, ConvertError>,
+        pub latex_calls: Arc<AtomicUsize>,
+        pub pdf_calls: Arc<AtomicUsize>,
     }
 
     impl MockConverter {
@@ -294,6 +298,8 @@ pub mod test_helpers {
             Self {
                 latex_result,
                 pdf_result,
+                latex_calls: Arc::new(AtomicUsize::new(0)),
+                pdf_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -301,10 +307,12 @@ pub mod test_helpers {
     #[async_trait]
     impl Converter for MockConverter {
         async fn latex_tar_to_markdown(&self, _tar_bytes: &[u8]) -> Result<String, ConvertError> {
+            self.latex_calls.fetch_add(1, Ordering::SeqCst);
             self.latex_result.clone()
         }
 
         async fn pdf_to_markdown(&self, _pdf_bytes: &[u8]) -> Result<String, ConvertError> {
+            self.pdf_calls.fetch_add(1, Ordering::SeqCst);
             self.pdf_result.clone()
         }
     }

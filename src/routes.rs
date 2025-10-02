@@ -144,15 +144,12 @@ pub async fn paper(
     };
 
     let (body_md, skip_metadata) = match client.get_source_archive(&id).await {
-        Ok(bytes) => match converter.latex_tar_to_markdown(&bytes).await {
+        Ok(bytes) => match convert_latex_with_retries(converter.as_ref(), &bytes, &id).await {
             Ok(s) => (s, false),
-            Err(err) => {
-                eprintln!("pandoc conversion failed for {id}: {err}");
-                match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
-                    Ok(s) => (s, true),
-                    Err(resp) => return resp,
-                }
-            }
+            Err(_err) => match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
+                Ok(s) => (s, true),
+                Err(resp) => return resp,
+            },
         },
         Err(ArxivError::PdfOnly) => {
             match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
@@ -237,6 +234,35 @@ async fn pdf_fallback(
         Ok(s) => Ok(s),
         Err(e) => Err(map_convert_err(e)),
     }
+}
+
+async fn convert_latex_with_retries(
+    converter: &(dyn Converter + Send + Sync),
+    tar_bytes: &[u8],
+    id: &str,
+) -> Result<String, ConvertError> {
+    const MAX_ATTEMPTS: usize = 4; // initial try + up to 3 retries
+    for attempt in 1..=MAX_ATTEMPTS {
+        match converter.latex_tar_to_markdown(tar_bytes).await {
+            Ok(md) => return Ok(md),
+            Err(err) => {
+                if attempt < MAX_ATTEMPTS {
+                    eprintln!(
+                        "pandoc conversion attempt {} failed for {}: {}; retrying",
+                        attempt, id, err
+                    );
+                } else {
+                    eprintln!(
+                        "pandoc conversion failed for {id} after {attempt} attempt(s): {err}"
+                    );
+                    return Err(err);
+                }
+            }
+        }
+    }
+    Err(ConvertError::Failed(
+        "pandoc retry loop exhausted unexpectedly".into(),
+    ))
 }
 
 fn strip_html_tags(input: &str) -> String {
@@ -581,6 +607,8 @@ mod tests {
             Err(ConvertError::Failed("pandoc failed".into())),
             Ok("pdf text".into()),
         );
+        let latex_calls = converter.latex_calls.clone();
+        let converter_pdf_calls = converter.pdf_calls.clone();
         let state = AppState::new(8, client, converter, None);
 
         let app = Router::new()
@@ -602,6 +630,8 @@ mod tests {
         assert_eq!(body.as_ref(), b"pdf text");
         assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
         assert_eq!(pdf_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(latex_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(converter_pdf_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
