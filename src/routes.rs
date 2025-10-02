@@ -12,7 +12,7 @@ use crate::{
     convert::{ConvertError, Converter},
     disk_cache::DiskCache,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 pub async fn index(headers: HeaderMap) -> Response {
     let path = std::env::var("MARKXIV_INDEX_MD").unwrap_or_else(|_| "content/index.md".to_string());
@@ -85,6 +85,7 @@ pub async fn paper(
     State(client): State<Arc<dyn ArxivClient + Send + Sync>>,
     State(converter): State<Arc<dyn Converter + Send + Sync>>,
     State(disk): State<Option<Arc<DiskCache>>>,
+    State(convert_limit): State<Arc<Semaphore>>,
     Path(raw_id): Path<String>,
     original_uri: OriginalUri,
     raw_query: Option<RawQuery>,
@@ -148,16 +149,34 @@ pub async fn paper(
     };
 
     let (body_md, skip_metadata) = match client.get_source_archive(&id).await {
-        Ok(bytes) => match convert_latex_with_retries(converter.as_ref(), &bytes, &id).await {
-            Ok(s) => (s, false),
-            Err(_err) => match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
-                Ok(s) => (s, true),
-                Err(resp) => return resp,
-            },
-        },
+        Ok(bytes) => {
+            match convert_latex_with_retries(converter.as_ref(), &bytes, &id, convert_limit.clone())
+                .await
+            {
+                Ok(s) => (s, false),
+                Err(_err) => match pdf_fallback(
+                    client.as_ref(),
+                    converter.as_ref(),
+                    &id,
+                    convert_limit.clone(),
+                )
+                .await
+                {
+                    Ok(s) => (s, true),
+                    Err(resp) => return resp,
+                },
+            }
+        }
         Err(_err @ ArxivError::PdfOnly) => {
             tracing::warn!(paper_id = %id, context = "source_archive", "arXiv reported PDF-only");
-            match pdf_fallback(client.as_ref(), converter.as_ref(), &id).await {
+            match pdf_fallback(
+                client.as_ref(),
+                converter.as_ref(),
+                &id,
+                convert_limit.clone(),
+            )
+            .await
+            {
                 Ok(s) => (s, true),
                 Err(resp) => return resp,
             }
@@ -242,10 +261,21 @@ async fn pdf_fallback(
     client: &(dyn ArxivClient + Send + Sync),
     converter: &(dyn Converter + Send + Sync),
     id: &str,
+    limit: Arc<Semaphore>,
 ) -> Result<String, Response> {
     let pdf_bytes = match client.get_pdf(id).await {
         Ok(b) => b,
         Err(err) => return Err(map_arxiv_err("pdf_fallback:get_pdf", id, err)),
+    };
+    let _permit = match limit.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Err(map_convert_err(
+                "pdf_fallback:limit",
+                id,
+                ConvertError::Failed("conversion limit unavailable".into()),
+            ))
+        }
     };
     match converter.pdf_to_markdown(&pdf_bytes).await {
         Ok(s) => Ok(s),
@@ -257,7 +287,13 @@ async fn convert_latex_with_retries(
     converter: &(dyn Converter + Send + Sync),
     tar_bytes: &[u8],
     id: &str,
+    limit: Arc<Semaphore>,
 ) -> Result<String, ConvertError> {
+    let _permit = limit
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ConvertError::Failed("conversion limit unavailable".into()))?;
     const MAX_ATTEMPTS: usize = 4; // initial try + up to 3 retries
     for attempt in 1..=MAX_ATTEMPTS {
         if attempt > 1 {
