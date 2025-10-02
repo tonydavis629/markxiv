@@ -133,12 +133,14 @@ impl DiskCache {
         let a = ((h >> 56) & 0xff) as u8;
         let b = ((h >> 48) & 0xff) as u8;
         let file = sanitize_filename(key);
+        let trimmed = file.trim_start_matches(|c| c == '/' || c == '\\');
+        let safe = if trimmed.is_empty() { "_" } else { trimmed };
         let path = self
             .cfg
             .root
             .join(format!("{:02x}", a))
             .join(format!("{:02x}", b))
-            .join(format!("{}.md.gz", file));
+            .join(format!("{}.md.gz", safe));
         Some(path)
     }
 }
@@ -227,6 +229,38 @@ mod tests {
         dc.put("1234.5678", "hello world").await.unwrap();
         let got = dc.get("1234.5678").await.unwrap();
         assert_eq!(got.as_deref(), Some("hello world"));
+        let _ = tokio::fs::remove_dir_all(tmp).await;
+    }
+
+    #[tokio::test]
+    async fn put_handles_leading_slash_key() {
+        let tmp = std::env::temp_dir().join(format!("mk-dc-{}", uuid()));
+        let cfg = DiskCacheConfig {
+            root: tmp.clone(),
+            cap_bytes: 10_000_000,
+            sweep_interval: Duration::from_secs(3600),
+        };
+        let dc = DiskCache::new(cfg).await.unwrap();
+        dc.put("/abs/1234.5678", "hello world").await.unwrap();
+
+        let mut stack = vec![tmp.clone()];
+        let mut found = false;
+        while let Some(dir) = stack.pop() {
+            let mut it = tokio::fs::read_dir(&dir).await.unwrap();
+            while let Some(entry) = it.next_entry().await.unwrap() {
+                let path = entry.path();
+                let ty = entry.file_type().await.unwrap();
+                if ty.is_dir() {
+                    stack.push(path);
+                } else if ty.is_file() {
+                    if path.extension().and_then(|s| s.to_str()) == Some("gz") {
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(found, "expected cached file inside disk cache root");
+
         let _ = tokio::fs::remove_dir_all(tmp).await;
     }
 
