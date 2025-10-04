@@ -296,20 +296,27 @@ async fn convert_latex_with_retries(
         .map_err(|_| ConvertError::Failed("conversion limit unavailable".into()))?;
     const MAX_ATTEMPTS: usize = 2; // initial try + up to 1 retry
     for attempt in 1..=MAX_ATTEMPTS {
-        if attempt > 1 {
+        if attempt == 2 {
             tracing::info!(
                 attempt,
                 paper_id = %id,
-                "retrying pandoc conversion"
+                "retrying pandoc conversion with latex macros disabled"
             );
         }
-        match converter.latex_tar_to_markdown(tar_bytes).await {
+        let result = if attempt == 1 {
+            converter.latex_tar_to_markdown(tar_bytes).await
+        } else {
+            converter
+                .latex_tar_to_markdown_without_macros(tar_bytes)
+                .await
+        };
+        match result {
             Ok(md) => {
                 if attempt > 1 {
                     tracing::info!(
                         attempt,
                         paper_id = %id,
-                        "pandoc conversion succeeded after retry"
+                        "pandoc conversion succeeded after retry with latex macros disabled"
                     );
                 }
                 return Ok(md);
@@ -682,6 +689,7 @@ mod tests {
             Ok("pdf text".into()),
         );
         let latex_calls = converter.latex_calls.clone();
+        let latex_nomacro_calls = converter.latex_nomacro_calls.clone();
         let converter_pdf_calls = converter.pdf_calls.clone();
         let state = AppState::new(8, client, converter, None);
 
@@ -704,7 +712,8 @@ mod tests {
         assert_eq!(body.as_ref(), b"pdf text");
         assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
         assert_eq!(pdf_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(latex_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(latex_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(latex_nomacro_calls.load(Ordering::SeqCst), 1);
         assert_eq!(converter_pdf_calls.load(Ordering::SeqCst), 1);
     }
 

@@ -81,7 +81,9 @@ impl DiskCache {
                     e.kind(),
                     format!(
                         "create_dir_all {} for key {} failed: {}",
-                        parent.display(), key, e
+                        parent.display(),
+                        key,
+                        e
                     ),
                 )
             })?;
@@ -103,7 +105,13 @@ impl DiskCache {
         tokio::fs::rename(&tmp, &path).await.map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("rename {} -> {} for key {} failed: {}", tmp.display(), path.display(), key, e),
+                format!(
+                    "rename {} -> {} for key {} failed: {}",
+                    tmp.display(),
+                    path.display(),
+                    key,
+                    e
+                ),
             )
         })?;
         // update size counter

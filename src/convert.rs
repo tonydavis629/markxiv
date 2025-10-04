@@ -19,6 +19,12 @@ pub enum ConvertError {
 #[async_trait]
 pub trait Converter {
     async fn latex_tar_to_markdown(&self, _tar_bytes: &[u8]) -> Result<String, ConvertError>;
+    async fn latex_tar_to_markdown_without_macros(
+        &self,
+        tar_bytes: &[u8],
+    ) -> Result<String, ConvertError> {
+        self.latex_tar_to_markdown(tar_bytes).await
+    }
     async fn pdf_to_markdown(&self, _pdf_bytes: &[u8]) -> Result<String, ConvertError>;
 }
 
@@ -33,6 +39,45 @@ impl PandocConverter {
 #[async_trait]
 impl Converter for PandocConverter {
     async fn latex_tar_to_markdown(&self, tar_bytes: &[u8]) -> Result<String, ConvertError> {
+        self.convert_latex(tar_bytes, PandocLatexMode::Standard)
+            .await
+    }
+
+    async fn latex_tar_to_markdown_without_macros(
+        &self,
+        tar_bytes: &[u8],
+    ) -> Result<String, ConvertError> {
+        self.convert_latex(tar_bytes, PandocLatexMode::NoMacros)
+            .await
+    }
+
+    async fn pdf_to_markdown(&self, pdf_bytes: &[u8]) -> Result<String, ConvertError> {
+        let workdir = make_temp_dir()
+            .await
+            .map_err(|e| ConvertError::Failed(format!("temp dir: {}", e)))?;
+        let pdf_path = workdir.join("source.pdf");
+
+        tokio::fs::write(&pdf_path, pdf_bytes)
+            .await
+            .map_err(|e| ConvertError::Failed(format!("write pdf: {}", e)))?;
+
+        let pdftotext =
+            std::env::var("MARKXIV_PDFTOTEXT_PATH").unwrap_or_else(|_| "pdftotext".into());
+        let result = run_pdftotext(&pdftotext, &pdf_path).await;
+
+        cleanup(&workdir).await;
+
+        let text_bytes = result?;
+        Ok(String::from_utf8_lossy(&text_bytes).into_owned())
+    }
+}
+
+impl PandocConverter {
+    async fn convert_latex(
+        &self,
+        tar_bytes: &[u8],
+        mode: PandocLatexMode,
+    ) -> Result<String, ConvertError> {
         let workdir = make_temp_dir()
             .await
             .map_err(|e| ConvertError::Failed(format!("temp dir: {}", e)))?;
@@ -65,7 +110,7 @@ impl Converter for PandocConverter {
             .file_name()
             .and_then(|s| s.to_str())
             .ok_or_else(|| ConvertError::Failed("invalid main tex path".into()))?;
-        let md_bytes = run_pandoc(&pandoc, main_parent, main_file).await?;
+        let md_bytes = run_pandoc(&pandoc, main_parent, main_file, mode).await?;
 
         // cleanup best-effort
         cleanup(&workdir).await;
@@ -73,26 +118,6 @@ impl Converter for PandocConverter {
         let mut md = String::from_utf8_lossy(&md_bytes).into_owned();
         md = sanitize_markdown(&md);
         Ok(md)
-    }
-
-    async fn pdf_to_markdown(&self, pdf_bytes: &[u8]) -> Result<String, ConvertError> {
-        let workdir = make_temp_dir()
-            .await
-            .map_err(|e| ConvertError::Failed(format!("temp dir: {}", e)))?;
-        let pdf_path = workdir.join("source.pdf");
-
-        tokio::fs::write(&pdf_path, pdf_bytes)
-            .await
-            .map_err(|e| ConvertError::Failed(format!("write pdf: {}", e)))?;
-
-        let pdftotext =
-            std::env::var("MARKXIV_PDFTOTEXT_PATH").unwrap_or_else(|_| "pdftotext".into());
-        let result = run_pdftotext(&pdftotext, &pdf_path).await;
-
-        cleanup(&workdir).await;
-
-        let text_bytes = result?;
-        Ok(String::from_utf8_lossy(&text_bytes).into_owned())
     }
 }
 
@@ -174,15 +199,32 @@ async fn collect_tex_files(root: &Path) -> io::Result<Vec<(PathBuf, String)>> {
     Ok(out)
 }
 
-async fn run_pandoc(pandoc: &str, cwd: &Path, main_file: &str) -> Result<Vec<u8>, ConvertError> {
+#[derive(Clone, Copy)]
+enum PandocLatexMode {
+    Standard,
+    NoMacros,
+}
+
+const PANDOC_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn run_pandoc(
+    pandoc: &str,
+    cwd: &Path,
+    main_file: &str,
+    mode: PandocLatexMode,
+) -> Result<Vec<u8>, ConvertError> {
     let mut cmd = Command::new(pandoc);
+    let format_arg = match mode {
+        PandocLatexMode::Standard => "latex",
+        PandocLatexMode::NoMacros => "latex-latex_macros",
+    };
     cmd.current_dir(cwd)
         .arg("-f")
-        .arg("latex")
+        .arg(format_arg)
         .arg("-t")
         .arg("gfm")
         .arg(main_file);
-    let out = timeout(Duration::from_secs(120), cmd.output())
+    let out = timeout(PANDOC_TIMEOUT, cmd.output())
         .await
         .map_err(|_| ConvertError::Failed("pandoc timed out".into()))
         .and_then(|r| r.map_err(|e| ConvertError::Failed(format!("pandoc spawn: {}", e))))?;
@@ -285,8 +327,10 @@ pub mod test_helpers {
 
     pub struct MockConverter {
         pub latex_result: Result<String, ConvertError>,
+        pub latex_nomacro_result: Option<Result<String, ConvertError>>,
         pub pdf_result: Result<String, ConvertError>,
         pub latex_calls: Arc<AtomicUsize>,
+        pub latex_nomacro_calls: Arc<AtomicUsize>,
         pub pdf_calls: Arc<AtomicUsize>,
     }
 
@@ -297,8 +341,10 @@ pub mod test_helpers {
         ) -> Self {
             Self {
                 latex_result,
+                latex_nomacro_result: None,
                 pdf_result,
                 latex_calls: Arc::new(AtomicUsize::new(0)),
+                latex_nomacro_calls: Arc::new(AtomicUsize::new(0)),
                 pdf_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
@@ -309,6 +355,16 @@ pub mod test_helpers {
         async fn latex_tar_to_markdown(&self, _tar_bytes: &[u8]) -> Result<String, ConvertError> {
             self.latex_calls.fetch_add(1, Ordering::SeqCst);
             self.latex_result.clone()
+        }
+
+        async fn latex_tar_to_markdown_without_macros(
+            &self,
+            _tar_bytes: &[u8],
+        ) -> Result<String, ConvertError> {
+            self.latex_nomacro_calls.fetch_add(1, Ordering::SeqCst);
+            self.latex_nomacro_result
+                .clone()
+                .unwrap_or_else(|| self.latex_result.clone())
         }
 
         async fn pdf_to_markdown(&self, _pdf_bytes: &[u8]) -> Result<String, ConvertError> {
