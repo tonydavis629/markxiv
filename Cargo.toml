@@ -19,6 +19,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
 tower-http = { version = "0.5", features = ["trace"] }
 num_cpus = "1.16"
+dotenvy = "0.15"
 
 [dev-dependencies]
 tower = "0.5"

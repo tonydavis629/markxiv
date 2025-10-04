@@ -308,7 +308,7 @@ fn strip_html_tags(input: &str) -> String {
 
 #[cfg(test)]
 mod sanitize_tests {
-    use super::sanitize_markdown;
+    use super::{sanitize_markdown, strip_html_tags};
 
     #[test]
     fn removes_figure_block() {
@@ -317,9 +317,21 @@ mod sanitize_tests {
         assert!(out.starts_with("# Title"));
         assert!(!out.contains("<figure"));
     }
+
+    #[test]
+    fn removes_trailing_html_tags() {
+        let s = "<p>Hello <strong>world</strong></p>";
+        let out = sanitize_markdown(s);
+        assert_eq!(out, "Hello world");
+    }
+
+    #[test]
+    fn strip_html_tags_retains_inner_text() {
+        let s = "<span class=\"note\">Note</span>: <em>important</em>";
+        assert_eq!(strip_html_tags(s), "Note: important");
+    }
 }
 
-#[cfg(test)]
 pub mod test_helpers {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

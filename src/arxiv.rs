@@ -255,6 +255,40 @@ fn looks_like_html(bytes: &[u8]) -> bool {
 }
 
 #[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    #[test]
+    fn parse_atom_metadata_extracts_fields() {
+        let atom = r#"<?xml version='1.0'?>
+            <feed>
+              <entry>
+                <title>Sample &lt;b&gt;Title&lt;/b&gt;</title>
+                <summary> Summary text </summary>
+                <author><name>Alice</name></author>
+                <author><name> Bob </name></author>
+              </entry>
+            </feed>"#;
+        let meta = parse_atom_metadata(atom).expect("metadata");
+        assert_eq!(meta.title, "Sample &lt;b&gt;Title&lt;/b&gt;");
+        assert_eq!(meta.summary, "Summary text");
+        assert_eq!(meta.authors, vec!["Alice".to_string(), "Bob".to_string()]);
+    }
+
+    #[test]
+    fn looks_like_pdf_recognizes_signature() {
+        assert!(looks_like_pdf(b"%PDF-1.7 rest"));
+        assert!(!looks_like_pdf(b"%!PS-Adobe"));
+    }
+
+    #[test]
+    fn looks_like_html_handles_whitespace() {
+        let html = b"\n  \t<html><body></body></html>";
+        assert!(looks_like_html(html));
+        assert!(!looks_like_html(b"{\"json\":true}"));
+    }
+}
+
 pub mod test_helpers {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

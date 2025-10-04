@@ -5,18 +5,11 @@ use std::path::PathBuf;
 use axum::{routing::get, Router};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnResponse, TraceLayer};
 
-mod arxiv;
-mod cache;
-mod convert;
-mod disk_cache;
-mod routes;
-mod state;
-mod tex_main;
-
-use crate::arxiv::ReqwestArxivClient;
-use crate::convert::PandocConverter;
-use crate::disk_cache::{DiskCache, DiskCacheConfig};
-use crate::state::AppState;
+use markxiv::arxiv::ReqwestArxivClient;
+use markxiv::convert::PandocConverter;
+use markxiv::disk_cache::{DiskCache, DiskCacheConfig};
+use markxiv::routes;
+use markxiv::state::AppState;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
@@ -36,6 +29,10 @@ fn resolve_log_path(path_env: Option<OsString>, dir_env: Option<OsString>) -> Pa
     } else {
         dir.join("markxiv.log")
     }
+}
+
+fn parse_port(port: Option<String>) -> u16 {
+    port.and_then(|s| s.parse().ok()).unwrap_or(8080)
 }
 
 fn init_tracing() {
@@ -79,7 +76,7 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_log_path;
+    use super::{parse_port, resolve_log_path};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -109,16 +106,29 @@ mod tests {
         let result = resolve_log_path(None, Some(OsString::from("")));
         assert_eq!(result, PathBuf::from("markxiv.log"));
     }
+
+    #[test]
+    fn parse_port_prefers_valid_input() {
+        assert_eq!(parse_port(Some("9090".into())), 9090);
+    }
+
+    #[test]
+    fn parse_port_rejects_invalid_values() {
+        assert_eq!(parse_port(Some("not-a-number".into())), 8080);
+    }
+
+    #[test]
+    fn parse_port_defaults_when_missing() {
+        assert_eq!(parse_port(None), 8080);
+    }
 }
 
 #[tokio::main]
 async fn main() {
+    let _ = dotenvy::dotenv();
     init_tracing();
 
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8080);
+    let port = parse_port(std::env::var("PORT").ok());
     let cache_cap: usize = std::env::var("MARKXIV_CACHE_CAP")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -172,7 +182,11 @@ async fn main() {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!(%addr, "listening");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
+    let actual_addr = listener
+        .local_addr()
+        .expect("failed to read listener address");
+    tracing::info!(%actual_addr, "listening");
+    println!("Server listening on http://{actual_addr}");
     axum::serve(listener, app).await.expect("server");
 }

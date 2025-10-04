@@ -309,6 +309,12 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(tmp).await;
     }
 
+    #[test]
+    fn sanitize_filename_replaces_unexpected_chars() {
+        let sanitized = sanitize_filename("/abs/12:34*56?");
+        assert_eq!(sanitized, "/abs/12:34_56_");
+    }
+
     fn uuid() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nanos = SystemTime::now()

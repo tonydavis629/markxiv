@@ -414,6 +414,64 @@ mod tests {
     use crate::state::AppState;
 
     #[test]
+    fn wants_html_defaults_true_without_header() {
+        assert!(super::wants_html(None));
+    }
+
+    #[test]
+    fn wants_html_detects_html_media_type() {
+        assert!(super::wants_html(Some("text/html,application/xhtml+xml")));
+    }
+
+    #[test]
+    fn wants_html_respects_explicit_markdown_preference() {
+        assert!(!super::wants_html(Some("text/markdown")));
+    }
+
+    #[test]
+    fn normalize_id_strips_pdf_suffix_case_insensitively() {
+        assert_eq!(super::normalize_id("1234v1.PDF"), "1234v1");
+    }
+
+    #[test]
+    fn normalize_id_leaves_non_pdf_suffix() {
+        assert_eq!(super::normalize_id("1234v1.tar"), "1234v1.tar");
+    }
+
+    #[tokio::test]
+    async fn markdown_response_sets_headers_and_body() {
+        let resp = super::markdown_response("hello".to_string(), "/abs/1234");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok()),
+            Some("text/markdown; charset=utf-8")
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::CONTENT_LOCATION)
+                .and_then(|h| h.to_str().ok()),
+            Some("/abs/1234")
+        );
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"hello");
+    }
+
+    #[test]
+    fn map_arxiv_err_translates_not_found() {
+        let resp = super::map_arxiv_err("metadata", "1234", ArxivError::NotFound);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn map_convert_err_translates_failure() {
+        let resp = super::map_convert_err("context", "1234", ConvertError::Failed("boom".into()));
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
     fn prepend_metadata_includes_authors_section() {
         let meta = Metadata {
             title: "Sample Title".into(),
