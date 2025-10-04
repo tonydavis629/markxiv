@@ -294,7 +294,7 @@ async fn convert_latex_with_retries(
         .acquire_owned()
         .await
         .map_err(|_| ConvertError::Failed("conversion limit unavailable".into()))?;
-    const MAX_ATTEMPTS: usize = 4; // initial try + up to 3 retries
+    const MAX_ATTEMPTS: usize = 2; // initial try + up to 1 retry
     for attempt in 1..=MAX_ATTEMPTS {
         if attempt > 1 {
             tracing::info!(
