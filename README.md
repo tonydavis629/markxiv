@@ -166,6 +166,31 @@ curl -s http://localhost:8080/abs/1601.00001?refresh=1
 MARKXIV_DISK_CACHE_CAP_BYTES=$((10*1024*1024*1024)) cargo run
 ```
 
+## MCP Server
+
+markxiv includes an MCP (Model Context Protocol) server that lets Claude and other AI assistants convert arXiv papers to markdown directly using the markxiv library — no web service needed.
+
+**Tools:** `convert_paper`, `get_paper_metadata`, `search_papers`
+
+Quick setup:
+```bash
+cd mcp
+cargo build --release
+```
+
+Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "markxiv": {
+      "command": "/path/to/target/release/markxiv-mcp"
+    }
+  }
+}
+```
+
+See [`mcp/README.md`](mcp/README.md) for full documentation.
+
 ## Notes
 
 - Conversion fidelity depends on pandoc and the paper’s LaTeX structure; complex macros/environments may not convert perfectly.

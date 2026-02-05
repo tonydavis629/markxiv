@@ -5,3 +5,6 @@ cache
 scripts
 .env
 logs
+__pycache__/
+*.egg-info/
+.venv/
