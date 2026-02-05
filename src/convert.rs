@@ -277,55 +277,6 @@ fn fix_katex_commands(input: &str) -> String {
     s.into_owned()
 }
 
-fn protect_math_angle_brackets(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut result = String::with_capacity(len + len / 10);
-    let mut i = 0;
-
-    while i < len {
-        if i + 1 < len && bytes[i] == b'$' && bytes[i + 1] == b'$' {
-            // Display math $$...$$
-            result.push_str("$$");
-            i += 2;
-            let start = i;
-            while i + 1 < len {
-                if bytes[i] == b'$' && bytes[i + 1] == b'$' {
-                    break;
-                }
-                i += 1;
-            }
-            let math = &input[start..i];
-            result.push_str(&math.replace('<', r"\langle ").replace('>', r"\rangle "));
-            if i + 1 < len && bytes[i] == b'$' && bytes[i + 1] == b'$' {
-                result.push_str("$$");
-                i += 2;
-            }
-        } else if bytes[i] == b'$' {
-            // Inline math $...$
-            result.push('$');
-            i += 1;
-            let start = i;
-            while i < len && bytes[i] != b'$' {
-                i += 1;
-            }
-            let math = &input[start..i];
-            result.push_str(&math.replace('<', r"\langle ").replace('>', r"\rangle "));
-            if i < len && bytes[i] == b'$' {
-                result.push('$');
-                i += 1;
-            }
-        } else {
-            // Regular character — handle multi-byte UTF-8
-            let ch = input[i..].chars().next().unwrap();
-            result.push(ch);
-            i += ch.len_utf8();
-        }
-    }
-
-    result
-}
-
 fn sanitize_markdown(input: &str) -> String {
     // 1) Remove entire <figure ...>...</figure> blocks (with embedded pdfs)
     let mut out = input.to_string();
@@ -349,30 +300,73 @@ fn sanitize_markdown(input: &str) -> String {
     }
     // 2) Fix KaTeX commands that are unsupported or malformed
     out = fix_katex_commands(&out);
-    // 3) Protect angle brackets inside math delimiters (before HTML stripping)
-    out = protect_math_angle_brackets(&out);
-    // 4) Strip any remaining HTML tags but keep their inner text
-    strip_html_tags(out.trim_start())
+    // 3) Strip HTML tags but preserve math blocks ($...$ and $$...$$) verbatim
+    strip_html_tags_preserve_math(out.trim_start())
 }
 
-fn strip_html_tags(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut in_tag = false;
-    for ch in input.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => {
-                if !in_tag {
-                    out.push('>');
-                } else {
-                    in_tag = false;
+/// Strip HTML tags from text while preserving math blocks verbatim.
+///
+/// Content inside `$...$` and `$$...$$` is copied as-is so that `<` and `>`
+/// in math expressions (e.g. `\texttt{<name>}`, comparisons) survive intact.
+fn strip_html_tags_preserve_math(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+
+    while i < len {
+        if i + 1 < len && bytes[i] == b'$' && bytes[i + 1] == b'$' {
+            // Display math $$...$$ — copy verbatim
+            out.push_str("$$");
+            i += 2;
+            while i + 1 < len {
+                if bytes[i] == b'$' && bytes[i + 1] == b'$' {
+                    break;
                 }
+                let ch = input[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
             }
-            _ => {
-                if !in_tag {
-                    out.push(ch)
+            if i + 1 < len && bytes[i] == b'$' && bytes[i + 1] == b'$' {
+                out.push_str("$$");
+                i += 2;
+            }
+        } else if bytes[i] == b'$' {
+            // Inline math $...$ — copy verbatim
+            out.push('$');
+            i += 1;
+            while i < len && bytes[i] != b'$' {
+                let ch = input[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+            if i < len && bytes[i] == b'$' {
+                out.push('$');
+                i += 1;
+            }
+        } else if bytes[i] == b'<' {
+            // Potential HTML tag — skip <...>
+            i += 1;
+            let mut found_close = false;
+            while i < len {
+                if bytes[i] == b'>' {
+                    found_close = true;
+                    i += 1;
+                    break;
                 }
+                i += 1;
             }
+            if !found_close {
+                // Unclosed `<` at end of input — drop it
+            }
+        } else if bytes[i] == b'>' {
+            // Stray > outside a tag — keep it
+            out.push('>');
+            i += 1;
+        } else {
+            let ch = input[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
         }
     }
     out
@@ -380,9 +374,7 @@ fn strip_html_tags(input: &str) -> String {
 
 #[cfg(test)]
 mod sanitize_tests {
-    use super::{
-        fix_katex_commands, protect_math_angle_brackets, sanitize_markdown, strip_html_tags,
-    };
+    use super::{fix_katex_commands, sanitize_markdown, strip_html_tags_preserve_math};
 
     #[test]
     fn removes_figure_block() {
@@ -400,9 +392,9 @@ mod sanitize_tests {
     }
 
     #[test]
-    fn strip_html_tags_retains_inner_text() {
+    fn strip_html_preserves_inner_text() {
         let s = "<span class=\"note\">Note</span>: <em>important</em>";
-        assert_eq!(strip_html_tags(s), "Note: important");
+        assert_eq!(strip_html_tags_preserve_math(s), "Note: important");
     }
 
     #[test]
@@ -434,20 +426,31 @@ mod sanitize_tests {
     }
 
     #[test]
-    fn protects_angle_brackets_in_math() {
+    fn preserves_angle_brackets_in_inline_math() {
         let input = r"text $a < b$ more text";
-        let out = protect_math_angle_brackets(input);
-        assert_eq!(out, r"text $a \langle  b$ more text");
-        assert!(!out.contains('<'));
+        let out = strip_html_tags_preserve_math(input);
+        assert_eq!(out, r"text $a < b$ more text");
     }
 
     #[test]
-    fn protects_angle_brackets_in_display_math() {
+    fn preserves_angle_brackets_in_display_math() {
         let input = r"text $$a < b > c$$ more";
-        let out = protect_math_angle_brackets(input);
-        assert!(out.contains(r"\langle "));
-        assert!(out.contains(r"\rangle "));
-        assert!(!out[2..out.len() - 4].contains('<'));
+        let out = strip_html_tags_preserve_math(input);
+        assert_eq!(out, r"text $$a < b > c$$ more");
+    }
+
+    #[test]
+    fn preserves_texttt_with_angle_brackets_in_math() {
+        let input = r"$$\texttt{<functional\_area> / <category>}$$";
+        let out = strip_html_tags_preserve_math(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn strips_html_outside_math_preserves_math() {
+        let input = "text <em>bold</em> more $a < b$ end <p>para</p>";
+        let out = strip_html_tags_preserve_math(input);
+        assert_eq!(out, "text bold more $a < b$ end para");
     }
 
     #[test]
@@ -458,10 +461,10 @@ mod sanitize_tests {
     }
 
     #[test]
-    fn angle_brackets_outside_math_unchanged() {
+    fn html_tags_outside_math_stripped() {
         let input = "text <em>hello</em> more";
-        let out = protect_math_angle_brackets(input);
-        assert_eq!(out, input);
+        let out = strip_html_tags_preserve_math(input);
+        assert_eq!(out, "text hello more");
     }
 }
 
