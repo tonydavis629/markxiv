@@ -330,16 +330,47 @@ fn normalize_display_math(input: &str) -> String {
     result
 }
 
-fn sanitize_markdown(input: &str) -> String {
-    // 1) Remove entire <figure ...>...</figure> blocks (with embedded pdfs)
+/// Convert `<figure>` blocks into markdown caption placeholders.
+///
+/// Instead of stripping figures entirely, extracts the `<figcaption>` text
+/// and produces `> **Figure N:** caption` blockquotes. This preserves figure
+/// context in the output and allows downstream enrichment with ar5iv links.
+fn extract_figure_captions(input: &str) -> String {
     let mut out = input.to_string();
+    let mut figure_num = 0u32;
     loop {
         let Some(start) = out.find("<figure") else {
             break;
         };
         if let Some(rel_end) = out[start..].find("</figure>") {
             let end = start + rel_end + "</figure>".len();
-            out.replace_range(start..end, "");
+            let block = out[start..end].to_string();
+            figure_num += 1;
+
+            // Extract caption from <figcaption>...</figcaption>
+            let caption = if let Some(fc_start) = block.find("<figcaption") {
+                let content_start = block[fc_start..].find('>').map(|i| fc_start + i + 1);
+                let fc_end = block.find("</figcaption>");
+                match (content_start, fc_end) {
+                    (Some(cs), Some(ce)) if cs < ce => {
+                        let text = block[cs..ce].trim();
+                        if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.to_string())
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let replacement = match caption {
+                Some(cap) => format!("\n\n> **Figure {}:** {}\n\n", figure_num, cap),
+                None => format!("\n\n> **Figure {}**\n\n", figure_num),
+            };
+            out.replace_range(start..end, &replacement);
         } else {
             // No closing tag; remove from start to next block break or end
             if let Some(rel_end) = out[start..].find("\n\n") {
@@ -351,6 +382,32 @@ fn sanitize_markdown(input: &str) -> String {
             }
         }
     }
+    out
+}
+
+/// Enrich figure placeholders with ar5iv viewing links.
+///
+/// Finds `> **Figure N:**` blockquotes produced by [`extract_figure_captions`]
+/// and appends a link to the [ar5iv](https://ar5iv.labs.arxiv.org) rendering
+/// of the paper where the actual figures can be viewed.
+///
+/// Addresses <https://github.com/tonydavis629/markxiv/issues/1>.
+pub fn add_ar5iv_figure_links(md: &str, paper_id: &str) -> String {
+    static RE_FIG: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^(> \*\*Figure \d+(?::?\*\*).*)$").unwrap());
+
+    let url = format!("https://ar5iv.labs.arxiv.org/html/{}", paper_id);
+    RE_FIG
+        .replace_all(md, |caps: &regex::Captures| {
+            let line = caps.get(1).unwrap().as_str();
+            format!("{} — [view on ar5iv]({})", line, url)
+        })
+        .into_owned()
+}
+
+fn sanitize_markdown(input: &str) -> String {
+    // 1) Convert <figure> blocks to markdown caption placeholders
+    let mut out = extract_figure_captions(input);
     // 2) Fix KaTeX commands that are unsupported or malformed
     out = fix_katex_commands(&out);
     // 3) Ensure display math blocks are on their own lines
@@ -430,16 +487,49 @@ fn strip_html_tags_preserve_math(input: &str) -> String {
 #[cfg(test)]
 mod sanitize_tests {
     use super::{
-        fix_katex_commands, normalize_display_math, sanitize_markdown,
-        strip_html_tags_preserve_math,
+        add_ar5iv_figure_links, extract_figure_captions, fix_katex_commands,
+        normalize_display_math, sanitize_markdown, strip_html_tags_preserve_math,
     };
 
     #[test]
-    fn removes_figure_block() {
+    fn converts_figure_block_to_caption() {
         let s = "<figure id=\"fig:concept\">\n<embed src=\"figures/latent_cot.pdf\"/>\n<figcaption>text</figcaption>\n</figure>\n\n# Title\nBody";
         let out = sanitize_markdown(s);
-        assert!(out.starts_with("# Title"));
         assert!(!out.contains("<figure"));
+        assert!(out.contains("> **Figure 1:** text"));
+        assert!(out.contains("# Title"));
+    }
+
+    #[test]
+    fn extract_figure_without_caption() {
+        let s = "<figure id=\"fig:x\"><embed src=\"x.pdf\"/></figure>\nrest";
+        let out = extract_figure_captions(s);
+        assert!(out.contains("> **Figure 1**"));
+        assert!(!out.contains("<figure"));
+    }
+
+    #[test]
+    fn extract_multiple_figures_numbered() {
+        let s = "<figure><figcaption>First</figcaption></figure>\ntext\n<figure><figcaption>Second</figcaption></figure>";
+        let out = extract_figure_captions(s);
+        assert!(out.contains("> **Figure 1:** First"));
+        assert!(out.contains("> **Figure 2:** Second"));
+    }
+
+    #[test]
+    fn add_ar5iv_links_enriches_figures() {
+        let md = "> **Figure 1:** Architecture overview\n\nSome text\n\n> **Figure 2:** Results";
+        let out = add_ar5iv_figure_links(md, "2107.02789");
+        assert!(out.contains("[view on ar5iv](https://ar5iv.labs.arxiv.org/html/2107.02789)"));
+        assert!(out.contains("> **Figure 1:** Architecture overview"));
+        assert!(out.contains("> **Figure 2:** Results"));
+    }
+
+    #[test]
+    fn add_ar5iv_links_no_match_unchanged() {
+        let md = "# Title\n\nNo figures here.";
+        let out = add_ar5iv_figure_links(md, "1234.5678");
+        assert_eq!(out, md);
     }
 
     #[test]

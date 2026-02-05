@@ -9,7 +9,7 @@ use axum::{
 use crate::{
     arxiv::{ArxivClient, ArxivError, Metadata},
     cache::MkCache,
-    convert::{ConvertError, Converter},
+    convert::{add_ar5iv_figure_links, ConvertError, Converter},
     disk_cache::DiskCache,
 };
 use tokio::sync::{Mutex, Semaphore};
@@ -183,6 +183,9 @@ pub async fn paper(
         }
         Err(err) => return map_arxiv_err("source_archive", &id, err),
     };
+
+    // Enrich figure placeholders with ar5iv viewing links (addresses #1)
+    let body_md = add_ar5iv_figure_links(&body_md, &id);
 
     let final_md = if skip_metadata {
         body_md
