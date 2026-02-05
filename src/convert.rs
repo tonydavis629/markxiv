@@ -1,7 +1,9 @@
 use crate::tex_main::select_main_tex;
 use async_trait::async_trait;
+use regex::Regex;
 use std::{
     path::{Path, PathBuf},
+    sync::LazyLock,
     time::Duration,
 };
 use thiserror::Error;
@@ -258,6 +260,72 @@ async fn run_pdftotext(pdftotext: &str, pdf_path: &Path) -> Result<Vec<u8>, Conv
     }
 }
 
+fn fix_katex_commands(input: &str) -> String {
+    static RE_MATHCAL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(\\mathcal\{[^}]*\})\{").unwrap());
+    static RE_TEXTSC: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\\textsc\{([^}]*)\}").unwrap());
+    static RE_CALL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\\Call\{([^}]*)\}\{([^}]*)\}").unwrap());
+    static RE_MATHBBM: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\\mathbbm\{([^}]*)\}").unwrap());
+
+    let s = RE_MATHCAL.replace_all(input, "${1}_{");
+    let s = RE_TEXTSC.replace_all(&s, r"\textbf{$1}");
+    let s = RE_CALL.replace_all(&s, r"\textbf{$1}($2)");
+    let s = RE_MATHBBM.replace_all(&s, r"\mathbb{$1}");
+    s.into_owned()
+}
+
+fn protect_math_angle_brackets(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len + len / 10);
+    let mut i = 0;
+
+    while i < len {
+        if i + 1 < len && bytes[i] == b'$' && bytes[i + 1] == b'$' {
+            // Display math $$...$$
+            result.push_str("$$");
+            i += 2;
+            let start = i;
+            while i + 1 < len {
+                if bytes[i] == b'$' && bytes[i + 1] == b'$' {
+                    break;
+                }
+                i += 1;
+            }
+            let math = &input[start..i];
+            result.push_str(&math.replace('<', r"\langle ").replace('>', r"\rangle "));
+            if i + 1 < len && bytes[i] == b'$' && bytes[i + 1] == b'$' {
+                result.push_str("$$");
+                i += 2;
+            }
+        } else if bytes[i] == b'$' {
+            // Inline math $...$
+            result.push('$');
+            i += 1;
+            let start = i;
+            while i < len && bytes[i] != b'$' {
+                i += 1;
+            }
+            let math = &input[start..i];
+            result.push_str(&math.replace('<', r"\langle ").replace('>', r"\rangle "));
+            if i < len && bytes[i] == b'$' {
+                result.push('$');
+                i += 1;
+            }
+        } else {
+            // Regular character — handle multi-byte UTF-8
+            let ch = input[i..].chars().next().unwrap();
+            result.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    result
+}
+
 fn sanitize_markdown(input: &str) -> String {
     // 1) Remove entire <figure ...>...</figure> blocks (with embedded pdfs)
     let mut out = input.to_string();
@@ -279,7 +347,11 @@ fn sanitize_markdown(input: &str) -> String {
             }
         }
     }
-    // 2) Strip any remaining HTML tags but keep their inner text
+    // 2) Fix KaTeX commands that are unsupported or malformed
+    out = fix_katex_commands(&out);
+    // 3) Protect angle brackets inside math delimiters (before HTML stripping)
+    out = protect_math_angle_brackets(&out);
+    // 4) Strip any remaining HTML tags but keep their inner text
     strip_html_tags(out.trim_start())
 }
 
@@ -308,7 +380,9 @@ fn strip_html_tags(input: &str) -> String {
 
 #[cfg(test)]
 mod sanitize_tests {
-    use super::{sanitize_markdown, strip_html_tags};
+    use super::{
+        fix_katex_commands, protect_math_angle_brackets, sanitize_markdown, strip_html_tags,
+    };
 
     #[test]
     fn removes_figure_block() {
@@ -329,6 +403,65 @@ mod sanitize_tests {
     fn strip_html_tags_retains_inner_text() {
         let s = "<span class=\"note\">Note</span>: <em>important</em>";
         assert_eq!(strip_html_tags(s), "Note: important");
+    }
+
+    #[test]
+    fn fixes_mathcal_missing_subscript() {
+        let input = r"$\mathcal{X}{Y}$";
+        let out = fix_katex_commands(input);
+        assert_eq!(out, r"$\mathcal{X}_{Y}$");
+    }
+
+    #[test]
+    fn fixes_textsc_to_textbf() {
+        let input = r"$\textsc{Algorithm}$";
+        let out = fix_katex_commands(input);
+        assert_eq!(out, r"$\textbf{Algorithm}$");
+    }
+
+    #[test]
+    fn fixes_call_macro() {
+        let input = r"$\Call{Solve}{x, y}$";
+        let out = fix_katex_commands(input);
+        assert_eq!(out, r"$\textbf{Solve}(x, y)$");
+    }
+
+    #[test]
+    fn fixes_mathbbm_to_mathbb() {
+        let input = r"$\mathbbm{1}$";
+        let out = fix_katex_commands(input);
+        assert_eq!(out, r"$\mathbb{1}$");
+    }
+
+    #[test]
+    fn protects_angle_brackets_in_math() {
+        let input = r"text $a < b$ more text";
+        let out = protect_math_angle_brackets(input);
+        assert_eq!(out, r"text $a \langle  b$ more text");
+        assert!(!out.contains('<'));
+    }
+
+    #[test]
+    fn protects_angle_brackets_in_display_math() {
+        let input = r"text $$a < b > c$$ more";
+        let out = protect_math_angle_brackets(input);
+        assert!(out.contains(r"\langle "));
+        assert!(out.contains(r"\rangle "));
+        assert!(!out[2..out.len() - 4].contains('<'));
+    }
+
+    #[test]
+    fn no_false_positive_on_frac() {
+        let input = r"$\frac{a}{b}$";
+        let out = fix_katex_commands(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn angle_brackets_outside_math_unchanged() {
+        let input = "text <em>hello</em> more";
+        let out = protect_math_angle_brackets(input);
+        assert_eq!(out, input);
     }
 }
 

@@ -21,6 +21,13 @@ pub trait ArxivClient {
     async fn get_source_archive(&self, id: &str) -> Result<Bytes, ArxivError>;
     async fn get_pdf(&self, id: &str) -> Result<Bytes, ArxivError>;
     async fn get_metadata(&self, id: &str) -> Result<Metadata, ArxivError>;
+    async fn search(
+        &self,
+        _query: &str,
+        _max_results: u32,
+    ) -> Result<Vec<SearchResult>, ArxivError> {
+        Err(ArxivError::NotImplemented)
+    }
 }
 
 pub struct ReqwestArxivClient {
@@ -172,6 +179,45 @@ impl ArxivClient for ReqwestArxivClient {
             .map_err(|e| ArxivError::Network(e.to_string()))?;
         parse_atom_metadata(&body).ok_or(ArxivError::NotFound)
     }
+
+    async fn search(
+        &self,
+        query: &str,
+        max_results: u32,
+    ) -> Result<Vec<SearchResult>, ArxivError> {
+        let max_results = max_results.min(50);
+        let url = Url::parse_with_params(
+            "https://export.arxiv.org/api/query",
+            &[
+                ("search_query", format!("all:{}", query).as_str()),
+                ("start", "0"),
+                ("max_results", &max_results.to_string()),
+            ],
+        )
+        .map_err(|e| ArxivError::Network(e.to_string()))?;
+
+        let res = self
+            .http
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/atom+xml")
+            .send()
+            .await
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
+
+        if !res.status().is_success() {
+            return Err(ArxivError::Network(format!(
+                "arXiv search HTTP {}",
+                res.status()
+            )));
+        }
+
+        let body = res
+            .text()
+            .await
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
+
+        Ok(parse_atom_search_results(&body))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +225,64 @@ pub struct Metadata {
     pub title: String,
     pub summary: String,
     pub authors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub authors: Vec<String>,
+    pub published: String,
+}
+
+fn parse_atom_search_results(atom: &str) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    let mut remainder = atom;
+    while let Some(start) = remainder.find("<entry") {
+        let entry_section = &remainder[start..];
+        let Some(end_rel) = entry_section.find("</entry>") else {
+            break;
+        };
+        let end = start + end_rel + "</entry>".len();
+        let entry = &remainder[start..end];
+
+        let title = extract_tag(entry, "title")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let summary = extract_tag(entry, "summary")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let authors = extract_authors(entry);
+        let published = extract_tag(entry, "published")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let id = extract_tag(entry, "id")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        // Extract arXiv ID from full URL (e.g. "http://arxiv.org/abs/1706.03762v5" → "1706.03762v5")
+        let arxiv_id = id
+            .rsplit('/')
+            .next()
+            .unwrap_or(&id)
+            .to_string();
+
+        if !title.is_empty() {
+            results.push(SearchResult {
+                id: arxiv_id,
+                title,
+                summary,
+                authors,
+                published,
+            });
+        }
+        remainder = &remainder[end..];
+    }
+    results
 }
 
 fn parse_atom_metadata(atom: &str) -> Option<Metadata> {
@@ -299,10 +403,12 @@ pub mod test_helpers {
         pub archive_response: Result<Bytes, ArxivError>,
         pub pdf_response: Result<Bytes, ArxivError>,
         pub metadata_response: Result<Metadata, ArxivError>,
+        pub search_response: Result<Vec<SearchResult>, ArxivError>,
         pub exists_calls: Arc<AtomicUsize>,
         pub archive_calls: Arc<AtomicUsize>,
         pub pdf_calls: Arc<AtomicUsize>,
         pub metadata_calls: Arc<AtomicUsize>,
+        pub search_calls: Arc<AtomicUsize>,
     }
 
     impl MockArxivClient {
@@ -317,10 +423,12 @@ pub mod test_helpers {
                 archive_response,
                 pdf_response,
                 metadata_response,
+                search_response: Ok(Vec::new()),
                 exists_calls: Arc::new(AtomicUsize::new(0)),
                 archive_calls: Arc::new(AtomicUsize::new(0)),
                 pdf_calls: Arc::new(AtomicUsize::new(0)),
                 metadata_calls: Arc::new(AtomicUsize::new(0)),
+                search_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -345,6 +453,15 @@ pub mod test_helpers {
         async fn get_metadata(&self, _id: &str) -> Result<Metadata, ArxivError> {
             self.metadata_calls.fetch_add(1, Ordering::SeqCst);
             self.metadata_response.clone()
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+            _max_results: u32,
+        ) -> Result<Vec<SearchResult>, ArxivError> {
+            self.search_calls.fetch_add(1, Ordering::SeqCst);
+            self.search_response.clone()
         }
     }
 }
