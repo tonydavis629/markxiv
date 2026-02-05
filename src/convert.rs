@@ -277,6 +277,59 @@ fn fix_katex_commands(input: &str) -> String {
     s.into_owned()
 }
 
+/// Ensure `$$...$$` display math blocks sit on their own lines.
+///
+/// Many markdown renderers (including KaTeX-based ones) require `$$` to start
+/// and end a line in order to be recognised as display math. When `$$` appears
+/// inline with text (e.g. `text $$x^2$$ more text`) the closing `$$` can be
+/// misparsed as two separate `$` inline-math delimiters, producing errors like
+/// "Can't use function '$' in math mode".
+fn normalize_display_math(input: &str) -> String {
+    static RE_DISPLAY: LazyLock<Regex> = LazyLock::new(|| {
+        // Match $$...$$, possibly spanning multiple lines, that have non-whitespace
+        // text on the same line before or after the delimiters.
+        Regex::new(r"(?s)\$\$(.+?)\$\$").unwrap()
+    });
+
+    let mut result = input.to_string();
+    // Iterate in reverse so that replacement offsets stay valid.
+    let matches: Vec<_> = RE_DISPLAY.find_iter(input).collect();
+    for m in matches.into_iter().rev() {
+        let start = m.start();
+        let end = m.end();
+        let matched = &input[start..end];
+        let inner = &matched[2..matched.len() - 2];
+
+        // Check whether the $$ is already on its own line.
+        let before = &input[..start];
+        let after = &input[end..];
+        let line_start_ok = before.is_empty()
+            || before.ends_with('\n')
+            || before.trim_end().ends_with('\n')
+            || before.trim_end().is_empty();
+        let line_end_ok =
+            after.is_empty() || after.starts_with('\n') || after.trim_start().starts_with('\n');
+
+        if line_start_ok && line_end_ok {
+            continue; // already properly isolated
+        }
+
+        // Rebuild with newlines around the block.
+        let mut replacement = String::new();
+        if !before.is_empty() && !before.ends_with('\n') {
+            replacement.push('\n');
+        }
+        replacement.push_str("$$");
+        replacement.push_str(inner);
+        replacement.push_str("$$");
+        if !after.is_empty() && !after.starts_with('\n') {
+            replacement.push('\n');
+        }
+        result.replace_range(start..end, &replacement);
+    }
+    result
+}
+
 fn sanitize_markdown(input: &str) -> String {
     // 1) Remove entire <figure ...>...</figure> blocks (with embedded pdfs)
     let mut out = input.to_string();
@@ -300,7 +353,9 @@ fn sanitize_markdown(input: &str) -> String {
     }
     // 2) Fix KaTeX commands that are unsupported or malformed
     out = fix_katex_commands(&out);
-    // 3) Strip HTML tags but preserve math blocks ($...$ and $$...$$) verbatim
+    // 3) Ensure display math blocks are on their own lines
+    out = normalize_display_math(&out);
+    // 4) Strip HTML tags but preserve math blocks ($...$ and $$...$$) verbatim
     strip_html_tags_preserve_math(out.trim_start())
 }
 
@@ -374,7 +429,10 @@ fn strip_html_tags_preserve_math(input: &str) -> String {
 
 #[cfg(test)]
 mod sanitize_tests {
-    use super::{fix_katex_commands, sanitize_markdown, strip_html_tags_preserve_math};
+    use super::{
+        fix_katex_commands, normalize_display_math, sanitize_markdown,
+        strip_html_tags_preserve_math,
+    };
 
     #[test]
     fn removes_figure_block() {
@@ -465,6 +523,30 @@ mod sanitize_tests {
         let input = "text <em>hello</em> more";
         let out = strip_html_tags_preserve_math(input);
         assert_eq!(out, "text hello more");
+    }
+
+    #[test]
+    fn normalize_display_math_isolates_inline_display() {
+        let input = "text $$x^2 + y^2$$ more text";
+        let out = normalize_display_math(input);
+        assert!(out.contains("\n$$x^2 + y^2$$\n"));
+        assert!(!out.contains("text $$"));
+    }
+
+    #[test]
+    fn normalize_display_math_leaves_already_isolated() {
+        let input = "text\n$$x^2 + y^2$$\nmore text";
+        let out = normalize_display_math(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn normalize_display_math_full_pipeline() {
+        // Simulates what caused "Can't use function '$' in math mode"
+        let input = r"$$\langle\texttt{a}\rangle / \langle\texttt{b}\rangle,$$ which balances";
+        let out = sanitize_markdown(input);
+        // The $$ block must be on its own line, not inline with "which balances"
+        assert!(out.contains("$$\n"));
     }
 }
 
