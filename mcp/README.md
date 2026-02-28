@@ -36,6 +36,28 @@ cargo build --release
 cargo install --path mcp
 ```
 
+## Run The MCP Server
+
+From the repo root (after `cargo build --release`):
+
+```bash
+./target/release/markxiv-mcp
+```
+
+Or if installed via `cargo install`:
+
+```bash
+markxiv-mcp
+```
+
+This server uses stdio transport, so it is meant to be launched by an MCP client (Claude Desktop, Inspector, etc.) rather than used as a standalone HTTP server.
+
+For local debugging with MCP Inspector:
+
+```bash
+npx @modelcontextprotocol/inspector ./target/release/markxiv-mcp
+```
+
 ## Claude Desktop Configuration
 
 Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):

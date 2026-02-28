@@ -172,10 +172,23 @@ markxiv includes an MCP (Model Context Protocol) server that lets Claude and oth
 
 **Tools:** `convert_paper`, `get_paper_metadata`, `search_papers`
 
-Quick setup:
+Build:
 ```bash
 cd mcp
 cargo build --release
+# Binary: ../target/release/markxiv-mcp
+```
+
+Run locally (stdio transport, for MCP clients):
+```bash
+./target/release/markxiv-mcp
+```
+
+The server communicates over stdin/stdout, so running it directly will wait for an MCP client to connect.
+
+Inspect locally with MCP Inspector:
+```bash
+npx @modelcontextprotocol/inspector ./target/release/markxiv-mcp
 ```
 
 Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
@@ -188,6 +201,8 @@ Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_conf
   }
 }
 ```
+
+After updating Claude config, restart Claude Desktop.
 
 See [`mcp/README.md`](mcp/README.md) for full documentation.
 
