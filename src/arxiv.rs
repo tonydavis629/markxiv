@@ -359,7 +359,6 @@ fn extract_authors(entry: &str) -> Vec<String> {
 }
 
 fn parse_html_figure_image_urls(html: &str, base_url: &str) -> Vec<String> {
-    let base_url = base_url.trim_end_matches('/');
     let mut urls = Vec::new();
     let mut search_from = 0;
 
@@ -373,16 +372,58 @@ fn parse_html_figure_image_urls(html: &str, base_url: &str) -> Vec<String> {
         search_from = abs_start + fig_end_rel + "</figure>".len();
 
         if let Some(src) = extract_img_src(fig_block) {
-            let full_url = if src.starts_with("http://") || src.starts_with("https://") {
-                src.to_string()
-            } else {
-                format!("{}/{}", base_url, src.trim_start_matches('/'))
-            };
+            let full_url = resolve_figure_img_url(base_url, src);
             urls.push(full_url);
         }
     }
 
     urls
+}
+
+fn resolve_figure_img_url(base_url: &str, src: &str) -> String {
+    if src.starts_with("http://") || src.starts_with("https://") {
+        return src.to_string();
+    }
+
+    let base = base_url.trim_end_matches('/');
+    let src_trimmed = src.trim_start_matches('/');
+
+    let Some(base_url) = Url::parse(base).ok() else {
+        return format!("{}/{}", base, src_trimmed);
+    };
+
+    // arXiv HTML pages can reference figure images as "<paper-id>vN/Figures/..."
+    // even when the page URL is "/html/<paper-id>". In that case, joining with
+    // "/html/<paper-id>/" duplicates the id segment, so anchor at "/html/".
+    if let Some(base_id) = base_url.path_segments().and_then(|mut segs| segs.next_back()) {
+        let base_id_no_version = strip_version_suffix(base_id);
+        let version_prefixed = src_trimmed.starts_with(&(base_id.to_string() + "/"))
+            || src_trimmed.starts_with(&(base_id_no_version.to_string() + "v"));
+        if version_prefixed {
+            if let Some(host) = base_url.host_str() {
+                return format!("{}://{}/html/{}", base_url.scheme(), host, src_trimmed);
+            }
+        }
+    }
+
+    if src.starts_with('/') {
+        if let Some(host) = base_url.host_str() {
+            return format!("{}://{}{}", base_url.scheme(), host, src);
+        }
+    }
+
+    format!("{}/{}", base, src_trimmed)
+}
+
+fn strip_version_suffix(id: &str) -> &str {
+    let Some(vpos) = id.rfind('v') else {
+        return id;
+    };
+    let suffix = &id[vpos + 1..];
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return id;
+    }
+    &id[..vpos]
 }
 
 fn extract_img_src(block: &str) -> Option<&str> {
@@ -490,6 +531,16 @@ mod metadata_tests {
         let html = r#"<figure><img src="https://cdn.example.com/img.png"/></figure>"#;
         let urls = parse_html_figure_image_urls(html, "https://arxiv.org/html/1234");
         assert_eq!(urls, vec!["https://cdn.example.com/img.png"]);
+    }
+
+    #[test]
+    fn parse_html_figure_images_avoids_duplicate_id_segment_for_versioned_src() {
+        let html = r#"<figure><img src="1706.03762v7/Figures/ModalNet-21.png"/></figure>"#;
+        let urls = parse_html_figure_image_urls(html, "https://arxiv.org/html/1706.03762");
+        assert_eq!(
+            urls,
+            vec!["https://arxiv.org/html/1706.03762v7/Figures/ModalNet-21.png"]
+        );
     }
 
     #[test]
