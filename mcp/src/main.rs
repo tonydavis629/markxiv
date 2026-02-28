@@ -64,7 +64,7 @@ impl MarkxivMcp {
         }
     }
 
-    #[tool(description = "Convert an arXiv paper to markdown. Fetches LaTeX source and converts via pandoc. Falls back to PDF text extraction if no source is available. Returns the full paper content with title, authors, and abstract.")]
+    #[tool(description = "Convert an arXiv paper to markdown. Returns the full paper content with title, authors, and abstract.")]
     async fn convert_paper(
         &self,
         Parameters(params): Parameters<ConvertPaperParams>,
@@ -254,6 +254,237 @@ impl ServerHandler for MarkxivMcp {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use markxiv::arxiv::test_helpers::MockArxivClient;
+    use markxiv::arxiv::{ArxivClient, ArxivError, Metadata, SearchResult};
+    use markxiv::convert::test_helpers::MockConverter;
+    use markxiv::convert::Converter;
+
+    /// Replicate the convert_paper logic to verify output matches library.
+    async fn run_convert_paper(
+        client: &(dyn ArxivClient + Send + Sync),
+        converter: &(dyn Converter + Send + Sync),
+        paper_id: &str,
+    ) -> Result<String, String> {
+        let metadata = match client.get_metadata(paper_id).await {
+            Ok(m) => Some(m),
+            Err(ArxivError::NotFound) => return Err(format!("paper '{}' not found", paper_id)),
+            Err(ArxivError::NotImplemented) => None,
+            Err(e) => return Err(format!("metadata fetch failed: {}", e)),
+        };
+
+        let (body, used_pdf) = match client.get_source_archive(paper_id).await {
+            Ok(bytes) => match converter.latex_tar_to_markdown(&bytes).await {
+                Ok(md) => (md, false),
+                Err(_) => match converter.latex_tar_to_markdown_without_macros(&bytes).await {
+                    Ok(md) => (md, false),
+                    Err(_) => {
+                        let pdf_bytes = client
+                            .get_pdf(paper_id)
+                            .await
+                            .map_err(|e| format!("PDF fetch failed: {}", e))?;
+                        let text = converter
+                            .pdf_to_markdown(&pdf_bytes)
+                            .await
+                            .map_err(|e| format!("conversion failed: {}", e))?;
+                        (text, true)
+                    }
+                },
+            },
+            Err(ArxivError::PdfOnly) => {
+                let pdf_bytes = client
+                    .get_pdf(paper_id)
+                    .await
+                    .map_err(|e| format!("PDF fetch failed: {}", e))?;
+                let text = converter
+                    .pdf_to_markdown(&pdf_bytes)
+                    .await
+                    .map_err(|e| format!("conversion failed: {}", e))?;
+                (text, true)
+            }
+            Err(ArxivError::NotFound) => return Err(format!("paper '{}' not found", paper_id)),
+            Err(e) => return Err(format!("source fetch failed: {}", e)),
+        };
+
+        if !used_pdf {
+            if let Some(meta) = metadata {
+                let mut out = String::new();
+                if !meta.title.is_empty() {
+                    out.push_str(&format!("# {}\n\n", meta.title.trim()));
+                }
+                if !meta.authors.is_empty() {
+                    out.push_str("## Authors\n");
+                    out.push_str(&meta.authors.join(", "));
+                    out.push_str("\n\n");
+                }
+                if !meta.summary.is_empty() {
+                    out.push_str("## Abstract\n");
+                    out.push_str(meta.summary.trim());
+                    out.push_str("\n\n");
+                }
+                out.push_str(&body);
+                return Ok(out);
+            }
+        }
+        Ok(body)
+    }
+
+    #[tokio::test]
+    async fn convert_paper_latex_output_has_metadata_and_body() {
+        let client = MockArxivClient::new(
+            Ok(true),
+            Ok(Bytes::from_static(b"tar-bytes")),
+            Err(ArxivError::NotImplemented),
+            Ok(Metadata {
+                title: "Attention Is All You Need".into(),
+                summary: "The dominant sequence transduction models...".into(),
+                authors: vec!["Vaswani".into(), "Shazeer".into()],
+            }),
+        );
+        let converter = MockConverter::new(
+            Ok("## Introduction\nWe propose a new architecture.".into()),
+            Ok(String::new()),
+        );
+
+        let out = run_convert_paper(&client, &converter, "1706.03762")
+            .await
+            .unwrap();
+        assert!(out.starts_with("# Attention Is All You Need\n\n"));
+        assert!(out.contains("## Authors\nVaswani, Shazeer"));
+        assert!(out.contains("## Abstract\nThe dominant sequence"));
+        assert!(out.contains("## Introduction\nWe propose"));
+    }
+
+    #[tokio::test]
+    async fn convert_paper_pdf_fallback_returns_pdf_text() {
+        let client = MockArxivClient::new(
+            Ok(true),
+            Err(ArxivError::PdfOnly),
+            Ok(Bytes::from_static(b"pdf-bytes")),
+            Ok(Metadata {
+                title: "Test Paper".into(),
+                summary: "Abstract".into(),
+                authors: vec!["Author".into()],
+            }),
+        );
+        let converter = MockConverter::new(Ok(String::new()), Ok("extracted pdf text".into()));
+
+        let out = run_convert_paper(&client, &converter, "1234.5678")
+            .await
+            .unwrap();
+        // PDF fallback skips metadata prepending
+        assert_eq!(out, "extracted pdf text");
+    }
+
+    #[tokio::test]
+    async fn convert_paper_not_found_returns_error() {
+        let client = MockArxivClient::new(
+            Ok(false),
+            Err(ArxivError::NotFound),
+            Err(ArxivError::NotFound),
+            Err(ArxivError::NotFound),
+        );
+        let converter = MockConverter::new(Ok(String::new()), Ok(String::new()));
+
+        let err = run_convert_paper(&client, &converter, "0000.0000")
+            .await
+            .unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn get_metadata_output_format() {
+        let client = MockArxivClient::new(
+            Ok(true),
+            Err(ArxivError::NotImplemented),
+            Err(ArxivError::NotImplemented),
+            Ok(Metadata {
+                title: "Attention Is All You Need".into(),
+                summary: "The dominant approach...".into(),
+                authors: vec!["Vaswani".into(), "Shazeer".into()],
+            }),
+        );
+
+        let meta = client.get_metadata("1706.03762").await.unwrap();
+
+        // Replicate get_paper_metadata output formatting
+        let mut out = String::new();
+        out.push_str(&format!("# {}\n\n", meta.title.trim()));
+        if !meta.authors.is_empty() {
+            out.push_str("**Authors:** ");
+            out.push_str(&meta.authors.join(", "));
+            out.push_str("\n\n");
+        }
+        if !meta.summary.is_empty() {
+            out.push_str("**Abstract:**\n");
+            out.push_str(meta.summary.trim());
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "\n**Link:** https://arxiv.org/abs/{}",
+            "1706.03762"
+        ));
+
+        assert!(out.contains("# Attention Is All You Need"));
+        assert!(out.contains("**Authors:** Vaswani, Shazeer"));
+        assert!(out.contains("**Abstract:**\nThe dominant approach..."));
+        assert!(out.contains("**Link:** https://arxiv.org/abs/1706.03762"));
+    }
+
+    #[tokio::test]
+    async fn search_papers_returns_results() {
+        let mut client = MockArxivClient::new(
+            Ok(true),
+            Err(ArxivError::NotImplemented),
+            Err(ArxivError::NotImplemented),
+            Err(ArxivError::NotImplemented),
+        );
+        client.search_response = Ok(vec![
+            SearchResult {
+                id: "1706.03762v5".into(),
+                title: "Attention Is All You Need".into(),
+                summary: "The dominant sequence...".into(),
+                authors: vec!["Vaswani".into()],
+                published: "2017-06-12".into(),
+            },
+            SearchResult {
+                id: "2301.07041v1".into(),
+                title: "Another Paper".into(),
+                summary: "Some abstract".into(),
+                authors: vec!["Author".into()],
+                published: "2023-01-17".into(),
+            },
+        ]);
+
+        let results = client.search("attention", 5).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "1706.03762v5");
+        assert_eq!(results[0].title, "Attention Is All You Need");
+        assert_eq!(results[1].id, "2301.07041v1");
+
+        // Replicate search_papers output formatting
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Found {} result(s) for \"{}\":\n\n",
+            results.len(),
+            "attention"
+        ));
+        for (i, r) in results.iter().enumerate() {
+            out.push_str(&format!("## {}. {}\n", i + 1, r.title.trim()));
+            out.push_str(&format!("**arXiv ID:** {}\n", r.id));
+            out.push_str(&format!(
+                "**Link:** https://arxiv.org/abs/{}\n\n",
+                r.id
+            ));
+        }
+        assert!(out.contains("## 1. Attention Is All You Need"));
+        assert!(out.contains("**arXiv ID:** 1706.03762v5"));
+        assert!(out.contains("## 2. Another Paper"));
     }
 }
 

@@ -28,6 +28,10 @@ pub trait ArxivClient {
     ) -> Result<Vec<SearchResult>, ArxivError> {
         Err(ArxivError::NotImplemented)
     }
+
+    async fn get_html_figure_image_urls(&self, _id: &str) -> Result<Vec<String>, ArxivError> {
+        Ok(vec![])
+    }
 }
 
 pub struct ReqwestArxivClient {
@@ -218,6 +222,24 @@ impl ArxivClient for ReqwestArxivClient {
 
         Ok(parse_atom_search_results(&body))
     }
+
+    async fn get_html_figure_image_urls(&self, id: &str) -> Result<Vec<String>, ArxivError> {
+        let base_url = format!("https://arxiv.org/html/{}", id);
+        let res = self
+            .http
+            .get(&base_url)
+            .send()
+            .await
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
+        if !res.status().is_success() {
+            return Ok(vec![]);
+        }
+        let html = res
+            .text()
+            .await
+            .map_err(|e| ArxivError::Network(e.to_string()))?;
+        Ok(parse_html_figure_image_urls(&html, &base_url))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +358,52 @@ fn extract_authors(entry: &str) -> Vec<String> {
     authors
 }
 
+fn parse_html_figure_image_urls(html: &str, base_url: &str) -> Vec<String> {
+    let base_url = base_url.trim_end_matches('/');
+    let mut urls = Vec::new();
+    let mut search_from = 0;
+
+    while let Some(rel_start) = html[search_from..].find("<figure") {
+        let abs_start = search_from + rel_start;
+        let section = &html[abs_start..];
+        let Some(fig_end_rel) = section.find("</figure>") else {
+            break;
+        };
+        let fig_block = &section[..fig_end_rel];
+        search_from = abs_start + fig_end_rel + "</figure>".len();
+
+        if let Some(src) = extract_img_src(fig_block) {
+            let full_url = if src.starts_with("http://") || src.starts_with("https://") {
+                src.to_string()
+            } else {
+                format!("{}/{}", base_url, src.trim_start_matches('/'))
+            };
+            urls.push(full_url);
+        }
+    }
+
+    urls
+}
+
+fn extract_img_src(block: &str) -> Option<&str> {
+    let img_start = block.find("<img")?;
+    let img_tag = &block[img_start..];
+    let tag_end = img_tag.find('>')?;
+    let tag = &img_tag[..tag_end];
+
+    if let Some(pos) = tag.find("src=\"") {
+        let after = &tag[pos + 5..];
+        let end = after.find('"')?;
+        Some(&after[..end])
+    } else if let Some(pos) = tag.find("src='") {
+        let after = &tag[pos + 5..];
+        let end = after.find('\'')?;
+        Some(&after[..end])
+    } else {
+        None
+    }
+}
+
 // Heuristics to detect unexpected payloads from the e-print endpoint
 fn looks_like_pdf(bytes: &[u8]) -> bool {
     bytes.len() >= 5 && &bytes[..5] == b"%PDF-"
@@ -391,6 +459,62 @@ mod metadata_tests {
         assert!(looks_like_html(html));
         assert!(!looks_like_html(b"{\"json\":true}"));
     }
+
+    #[test]
+    fn parse_html_figure_images_extracts_img_srcs() {
+        let html = r#"
+            <figure id="S1.F1">
+                <img src="extracted/Figures/fig1.png" alt="Figure 1"/>
+                <figcaption>Architecture</figcaption>
+            </figure>
+            <p>Some text</p>
+            <figure id="S1.F2">
+                <img src="extracted/Figures/fig2.png" alt="Figure 2"/>
+                <figcaption>Results</figcaption>
+            </figure>
+        "#;
+        let urls = parse_html_figure_image_urls(html, "https://arxiv.org/html/1706.03762v7");
+        assert_eq!(urls.len(), 2);
+        assert_eq!(
+            urls[0],
+            "https://arxiv.org/html/1706.03762v7/extracted/Figures/fig1.png"
+        );
+        assert_eq!(
+            urls[1],
+            "https://arxiv.org/html/1706.03762v7/extracted/Figures/fig2.png"
+        );
+    }
+
+    #[test]
+    fn parse_html_figure_images_handles_absolute_urls() {
+        let html = r#"<figure><img src="https://cdn.example.com/img.png"/></figure>"#;
+        let urls = parse_html_figure_image_urls(html, "https://arxiv.org/html/1234");
+        assert_eq!(urls, vec!["https://cdn.example.com/img.png"]);
+    }
+
+    #[test]
+    fn parse_html_figure_images_empty_when_no_figures() {
+        let html = "<html><body><p>No figures here</p></body></html>";
+        let urls = parse_html_figure_image_urls(html, "https://arxiv.org/html/1234");
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn parse_html_figure_images_skips_figures_without_img() {
+        let html = r#"
+            <figure><figcaption>Caption only</figcaption></figure>
+            <figure><img src="real.png"/></figure>
+        "#;
+        let urls = parse_html_figure_image_urls(html, "https://arxiv.org/html/1234");
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0], "https://arxiv.org/html/1234/real.png");
+    }
+
+    #[test]
+    fn extract_img_src_handles_single_quotes() {
+        let block = "<figure><img src='image.png' alt='test'/></figure>";
+        assert_eq!(extract_img_src(block), Some("image.png"));
+    }
 }
 
 pub mod test_helpers {
@@ -404,6 +528,7 @@ pub mod test_helpers {
         pub pdf_response: Result<Bytes, ArxivError>,
         pub metadata_response: Result<Metadata, ArxivError>,
         pub search_response: Result<Vec<SearchResult>, ArxivError>,
+        pub html_figure_urls_response: Result<Vec<String>, ArxivError>,
         pub exists_calls: Arc<AtomicUsize>,
         pub archive_calls: Arc<AtomicUsize>,
         pub pdf_calls: Arc<AtomicUsize>,
@@ -424,6 +549,7 @@ pub mod test_helpers {
                 pdf_response,
                 metadata_response,
                 search_response: Ok(Vec::new()),
+                html_figure_urls_response: Ok(Vec::new()),
                 exists_calls: Arc::new(AtomicUsize::new(0)),
                 archive_calls: Arc::new(AtomicUsize::new(0)),
                 pdf_calls: Arc::new(AtomicUsize::new(0)),
@@ -462,6 +588,10 @@ pub mod test_helpers {
         ) -> Result<Vec<SearchResult>, ArxivError> {
             self.search_calls.fetch_add(1, Ordering::SeqCst);
             self.search_response.clone()
+        }
+
+        async fn get_html_figure_image_urls(&self, _id: &str) -> Result<Vec<String>, ArxivError> {
+            self.html_figure_urls_response.clone()
         }
     }
 }

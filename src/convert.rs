@@ -385,22 +385,33 @@ fn extract_figure_captions(input: &str) -> String {
     out
 }
 
-/// Enrich figure placeholders with ar5iv viewing links.
+/// Enrich figure placeholders with links to figure images on arxiv HTML.
 ///
 /// Finds `> **Figure N:**` blockquotes produced by [`extract_figure_captions`]
-/// and appends a link to the [ar5iv](https://ar5iv.labs.arxiv.org) rendering
-/// of the paper where the actual figures can be viewed.
+/// and wraps each as a markdown link to the corresponding figure image URL
+/// from the paper's [arxiv HTML](https://arxiv.org/html/) rendering.
+///
+/// If `figure_image_urls` is empty (e.g. the paper has no HTML version),
+/// the markdown is returned unchanged as a graceful fallback.
 ///
 /// Addresses <https://github.com/tonydavis629/markxiv/issues/1>.
-pub fn add_ar5iv_figure_links(md: &str, paper_id: &str) -> String {
-    static RE_FIG: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?m)^(> \*\*Figure \d+(?::?\*\*).*)$").unwrap());
+pub fn add_arxiv_figure_html_links(md: &str, figure_image_urls: &[String]) -> String {
+    if figure_image_urls.is_empty() {
+        return md.to_string();
+    }
 
-    let url = format!("https://ar5iv.labs.arxiv.org/html/{}", paper_id);
+    static RE_FIG: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^> (\*\*Figure (\d+)(?::?\*\*).*)$").unwrap());
+
     RE_FIG
         .replace_all(md, |caps: &regex::Captures| {
-            let line = caps.get(1).unwrap().as_str();
-            format!("{} — [view on ar5iv]({})", line, url)
+            let content = caps.get(1).unwrap().as_str();
+            let num: usize = caps.get(2).unwrap().as_str().parse().unwrap_or(0);
+            if num > 0 && num <= figure_image_urls.len() {
+                format!("> [{}]({})", content, figure_image_urls[num - 1])
+            } else {
+                format!("> {}", content)
+            }
         })
         .into_owned()
 }
@@ -487,7 +498,7 @@ fn strip_html_tags_preserve_math(input: &str) -> String {
 #[cfg(test)]
 mod sanitize_tests {
     use super::{
-        add_ar5iv_figure_links, extract_figure_captions, fix_katex_commands,
+        add_arxiv_figure_html_links, extract_figure_captions, fix_katex_commands,
         normalize_display_math, sanitize_markdown, strip_html_tags_preserve_math,
     };
 
@@ -517,19 +528,43 @@ mod sanitize_tests {
     }
 
     #[test]
-    fn add_ar5iv_links_enriches_figures() {
+    fn add_arxiv_figure_links_wraps_captions_as_image_links() {
         let md = "> **Figure 1:** Architecture overview\n\nSome text\n\n> **Figure 2:** Results";
-        let out = add_ar5iv_figure_links(md, "2107.02789");
-        assert!(out.contains("[view on ar5iv](https://ar5iv.labs.arxiv.org/html/2107.02789)"));
-        assert!(out.contains("> **Figure 1:** Architecture overview"));
-        assert!(out.contains("> **Figure 2:** Results"));
+        let urls = vec![
+            "https://arxiv.org/html/1706.03762v7/Figures/ModalNet-21.png".to_string(),
+            "https://arxiv.org/html/1706.03762v7/Figures/results.png".to_string(),
+        ];
+        let out = add_arxiv_figure_html_links(md, &urls);
+        assert_eq!(
+            out,
+            "> [**Figure 1:** Architecture overview](https://arxiv.org/html/1706.03762v7/Figures/ModalNet-21.png)\n\nSome text\n\n> [**Figure 2:** Results](https://arxiv.org/html/1706.03762v7/Figures/results.png)"
+        );
     }
 
     #[test]
-    fn add_ar5iv_links_no_match_unchanged() {
+    fn add_arxiv_figure_links_fallback_when_no_urls() {
+        let md = "> **Figure 1:** Architecture overview\n\nSome text";
+        let out = add_arxiv_figure_html_links(md, &[]);
+        assert_eq!(out, md, "should return unchanged when no URLs available");
+    }
+
+    #[test]
+    fn add_arxiv_figure_links_no_match_unchanged() {
         let md = "# Title\n\nNo figures here.";
-        let out = add_ar5iv_figure_links(md, "1234.5678");
+        let out = add_arxiv_figure_html_links(md, &["https://example.com/img.png".to_string()]);
         assert_eq!(out, md);
+    }
+
+    #[test]
+    fn add_arxiv_figure_links_partial_urls() {
+        // More figures in markdown than URLs available
+        let md = "> **Figure 1:** First\n\n> **Figure 2:** Second\n\n> **Figure 3:** Third";
+        let urls = vec!["https://arxiv.org/html/1234/fig1.png".to_string()];
+        let out = add_arxiv_figure_html_links(md, &urls);
+        assert!(out.contains("[**Figure 1:** First](https://arxiv.org/html/1234/fig1.png)"));
+        // Figures without URLs should be unchanged
+        assert!(out.contains("> **Figure 2:** Second"));
+        assert!(out.contains("> **Figure 3:** Third"));
     }
 
     #[test]
@@ -637,6 +672,84 @@ mod sanitize_tests {
         let out = sanitize_markdown(input);
         // The $$ block must be on its own line, not inline with "which balances"
         assert!(out.contains("$$\n"));
+    }
+
+    // ── KaTeX before / after tests ─────────────────────────────────────
+    //
+    // Each test demonstrates a real LaTeX pattern that KaTeX cannot render
+    // (the "before" string) and shows how fix_katex_commands transforms it
+    // into something KaTeX handles correctly (the "after" string).
+
+    #[test]
+    fn katex_before_after_mathcal_subscript() {
+        // Papers often write \mathcal{X}{Y} meaning "calligraphic X subscript Y".
+        // Before: KaTeX parses \mathcal{X} then hits an unexpected {Y} → error:
+        //   "KaTeX parse error: Expected 'EOF', got '{' at position ..."
+        let before = r"$\mathcal{X}{Y} = f(x)$";
+        // After: inserting underscore makes it a valid subscript expression.
+        let after = r"$\mathcal{X}_{Y} = f(x)$";
+        assert_eq!(fix_katex_commands(before), after);
+    }
+
+    #[test]
+    fn katex_before_after_textsc() {
+        // \textsc (small caps) is used in algorithm names, e.g. \textsc{Adam}.
+        // Before: KaTeX has no \textsc support → error:
+        //   "KaTeX parse error: Undefined control sequence: \textsc"
+        let before = r"$\textsc{Adam}$";
+        // After: \textbf is a reasonable visual fallback that KaTeX renders.
+        let after = r"$\textbf{Adam}$";
+        assert_eq!(fix_katex_commands(before), after);
+    }
+
+    #[test]
+    fn katex_before_after_call_macro() {
+        // \Call{Name}{args} is an algorithmic pseudo-code macro from the
+        // algorithm2e / algorithmicx packages.
+        // Before: KaTeX does not define \Call → error:
+        //   "KaTeX parse error: Undefined control sequence: \Call"
+        let before = r"$\Call{DFS}{v, visited}$";
+        // After: replaced with bold name and parenthesized args, which
+        // renders cleanly and preserves the intent.
+        let after = r"$\textbf{DFS}(v, visited)$";
+        assert_eq!(fix_katex_commands(before), after);
+    }
+
+    #[test]
+    fn katex_before_after_mathbbm() {
+        // \mathbbm (from the bbm package) is used for indicator functions: 𝟙.
+        // Before: KaTeX only supports \mathbb, not \mathbbm → error:
+        //   "KaTeX parse error: Undefined control sequence: \mathbbm"
+        let before = r"$\mathbbm{1}_{A}$";
+        // After: \mathbb{1} renders as the standard blackboard bold indicator.
+        let after = r"$\mathbb{1}_{A}$";
+        assert_eq!(fix_katex_commands(before), after);
+    }
+
+    #[test]
+    fn katex_before_after_display_math_inline() {
+        // When pandoc emits $$...$$ inline with surrounding text, many
+        // markdown+KaTeX renderers misparse it as two separate $ delimiters.
+        // Before: "text $$x^2$$ more" → KaTeX error:
+        //   "Can't use function '$' in math mode"
+        let before = "We define $$E = mc^2$$ as the energy.";
+        let after = normalize_display_math(before);
+        // After: $$ block is isolated on its own line, fixing the parse.
+        assert!(after.contains("\n$$E = mc^2$$\n"));
+        assert!(!after.contains("We define $$"));
+    }
+
+    #[test]
+    fn katex_before_after_angle_brackets_in_math() {
+        // Pandoc output may contain angle brackets in math that look like HTML
+        // tags to a naive HTML stripper, destroying the math expression.
+        // Before: a naive strip would turn "$a < b > c$" into "$a  c$"
+        // because "< b >" looks like an HTML tag.
+        let before = "text <em>bold</em> and $a < b > c$ here";
+        let after = strip_html_tags_preserve_math(before);
+        // After: HTML tags outside math are stripped, but math content
+        // (including angle brackets) is preserved verbatim.
+        assert_eq!(after, "text bold and $a < b > c$ here");
     }
 }
 

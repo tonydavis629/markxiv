@@ -927,6 +927,7 @@ dependencies = [
 name = "markxiv-mcp"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "markxiv",
  "rmcp",
  "serde",
