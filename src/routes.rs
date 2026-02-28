@@ -9,7 +9,7 @@ use axum::{
 use crate::{
     arxiv::{ArxivClient, ArxivError, Metadata},
     cache::MkCache,
-    convert::{ConvertError, Converter},
+    convert::{add_arxiv_figure_html_links, ConvertError, Converter},
     disk_cache::DiskCache,
 };
 use tokio::sync::{Mutex, Semaphore};
@@ -183,6 +183,14 @@ pub async fn paper(
         }
         Err(err) => return map_arxiv_err("source_archive", &id, err),
     };
+
+    // Enrich figure placeholders with arxiv HTML image links (addresses #1).
+    // Falls back gracefully (no links) if the paper has no HTML version.
+    let figure_urls = client
+        .get_html_figure_image_urls(&id)
+        .await
+        .unwrap_or_default();
+    let body_md = add_arxiv_figure_html_links(&body_md, &figure_urls);
 
     let final_md = if skip_metadata {
         body_md

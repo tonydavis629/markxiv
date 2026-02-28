@@ -1,9 +1,13 @@
+[workspace]
+members = ["mcp"]
+
 [package]
 name = "markxiv"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+regex = "1"
 axum = { version = "0.7", features = ["original-uri"] }
 tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "process", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "deflate", "brotli"] }
