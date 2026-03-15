@@ -1,4 +1,5 @@
 pub mod arxiv;
+pub mod biorxiv;
 pub mod cache;
 pub mod convert;
 pub mod disk_cache;

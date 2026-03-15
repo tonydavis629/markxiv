@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{OriginalUri, Path, RawQuery, State},
+    extract::{Path, RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 
 use crate::{
-    arxiv::{ArxivClient, ArxivError, Metadata},
-    cache::MkCache,
+    arxiv::{normalize_arxiv_id, Metadata, PaperSource, PaperSourceError},
+    biorxiv::{canonical_biorxiv_path, normalize_biorxiv_id},
     convert::{add_arxiv_figure_html_links, ConvertError, Converter},
-    disk_cache::DiskCache,
+    state::AppState,
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 
 pub async fn index(headers: HeaderMap) -> Response {
     let path = std::env::var("MARKXIV_INDEX_MD").unwrap_or_else(|_| "content/index.md".to_string());
@@ -81,30 +81,90 @@ pub async fn health() -> &'static str {
 }
 
 pub async fn paper(
-    State(cache): State<Arc<Mutex<MkCache>>>,
-    State(client): State<Arc<dyn ArxivClient + Send + Sync>>,
-    State(converter): State<Arc<dyn Converter + Send + Sync>>,
-    State(disk): State<Option<Arc<DiskCache>>>,
-    State(convert_limit): State<Arc<Semaphore>>,
+    State(state): State<AppState>,
     Path(raw_id): Path<String>,
-    original_uri: OriginalUri,
     raw_query: Option<RawQuery>,
 ) -> Response {
-    let trimmed = raw_id.trim();
-    let normalized = normalize_id(trimmed);
-
-    let original_path = original_uri.path().to_string();
-    let canonical_path = format!("/abs/{}", normalized);
-
-    // Minimal id validation: non-empty and ascii
-    if normalized.is_empty() || !normalized.is_ascii() {
+    let Some(id) = normalize_arxiv_id(&raw_id) else {
         return (StatusCode::BAD_REQUEST, "invalid id").into_response();
-    }
+    };
 
-    let id = normalized.to_string();
-    let cache_key = canonical_path.clone();
+    let content_location = format!("/abs/{}", id);
+    paper_with_provider(
+        &state,
+        ProviderRequest {
+            provider_name: "arXiv",
+            cache_namespace: "arxiv",
+            paper_id: id,
+            cache_path: content_location.clone(),
+            content_location,
+            client: state.arxiv_client.clone(),
+        },
+        parse_refresh(raw_query),
+    )
+    .await
+}
 
-    let refresh = raw_query
+pub async fn pdf_paper(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    raw_query: Option<RawQuery>,
+) -> Response {
+    let Some(id) = normalize_arxiv_id(&raw_id) else {
+        return (StatusCode::BAD_REQUEST, "invalid id").into_response();
+    };
+
+    paper_with_provider(
+        &state,
+        ProviderRequest {
+            provider_name: "arXiv",
+            cache_namespace: "arxiv",
+            paper_id: id.clone(),
+            cache_path: format!("/abs/{}", id),
+            content_location: format!("/pdf/{}", id),
+            client: state.arxiv_client.clone(),
+        },
+        parse_refresh(raw_query),
+    )
+    .await
+}
+
+pub async fn bio_paper(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    raw_query: Option<RawQuery>,
+) -> Response {
+    let Some(id) = normalize_biorxiv_id(&raw_id) else {
+        return (StatusCode::BAD_REQUEST, "invalid id").into_response();
+    };
+
+    let content_location = canonical_biorxiv_path(&id);
+    paper_with_provider(
+        &state,
+        ProviderRequest {
+            provider_name: "bioRxiv",
+            cache_namespace: "biorxiv",
+            paper_id: id,
+            cache_path: content_location.clone(),
+            content_location,
+            client: state.biorxiv_client.clone(),
+        },
+        parse_refresh(raw_query),
+    )
+    .await
+}
+
+struct ProviderRequest {
+    provider_name: &'static str,
+    cache_namespace: &'static str,
+    paper_id: String,
+    cache_path: String,
+    content_location: String,
+    client: Arc<dyn PaperSource + Send + Sync>,
+}
+
+fn parse_refresh(raw_query: Option<RawQuery>) -> bool {
+    raw_query
         .and_then(|q| q.0)
         .unwrap_or_default()
         .split('&')
@@ -118,17 +178,25 @@ pub async fn paper(
                 None
             }
         })
-        .is_some();
+        .is_some()
+}
+
+async fn paper_with_provider(
+    state: &AppState,
+    request: ProviderRequest,
+    refresh: bool,
+) -> Response {
+    let cache_key = format!("{}:{}", request.cache_namespace, request.cache_path);
 
     if !refresh {
-        if let Some(md) = cache.lock().await.get(&cache_key) {
-            return markdown_response(md, &original_path);
+        if let Some(md) = state.cache.lock().await.get(&cache_key) {
+            return markdown_response(md, &request.content_location);
         }
-        if let Some(dc) = &disk {
+        if let Some(dc) = &state.disk {
             match dc.get(&cache_key).await {
                 Ok(Some(md)) => {
-                    cache.lock().await.put(cache_key.clone(), md.clone());
-                    return markdown_response(md, &original_path);
+                    state.cache.lock().await.put(cache_key.clone(), md.clone());
+                    return markdown_response(md, &request.content_location);
                 }
                 Ok(None) => {}
                 Err(e) => tracing::error!(error = %e, "disk cache read error"),
@@ -136,29 +204,35 @@ pub async fn paper(
         }
     }
 
-    // Fetch metadata (title, abstract). If not implemented, continue without them.
-    let metadata = match client.get_metadata(&id).await {
+    let metadata = match request.client.get_metadata(&request.paper_id).await {
         Ok(m) => Some(m),
-        Err(err @ ArxivError::NotFound) => {
-            return map_arxiv_err("metadata", &id, err);
+        Err(err @ PaperSourceError::NotFound) => {
+            return map_source_err(request.provider_name, "metadata", &request.paper_id, err);
         }
-        Err(ArxivError::NotImplemented) => None,
+        Err(PaperSourceError::NotImplemented) => None,
         Err(err) => {
-            return map_arxiv_err("metadata", &id, err);
+            return map_source_err(request.provider_name, "metadata", &request.paper_id, err);
         }
     };
 
-    let (body_md, skip_metadata) = match client.get_source_archive(&id).await {
+    let (body_md, skip_metadata) = match request.client.get_source_archive(&request.paper_id).await
+    {
         Ok(bytes) => {
-            match convert_latex_with_retries(converter.as_ref(), &bytes, &id, convert_limit.clone())
-                .await
+            match convert_latex_with_retries(
+                state.converter.as_ref(),
+                &bytes,
+                &request.paper_id,
+                state.convert_limit.clone(),
+            )
+            .await
             {
                 Ok(s) => (s, false),
                 Err(_err) => match pdf_fallback(
-                    client.as_ref(),
-                    converter.as_ref(),
-                    &id,
-                    convert_limit.clone(),
+                    request.client.as_ref(),
+                    state.converter.as_ref(),
+                    &request.paper_id,
+                    state.convert_limit.clone(),
+                    request.provider_name,
                 )
                 .await
                 {
@@ -167,13 +241,14 @@ pub async fn paper(
                 },
             }
         }
-        Err(_err @ ArxivError::PdfOnly) => {
-            tracing::warn!(paper_id = %id, context = "source_archive", "arXiv reported PDF-only");
+        Err(_err @ PaperSourceError::PdfOnly) => {
+            tracing::warn!(paper_id = %request.paper_id, context = "source_archive", provider = request.provider_name, "provider reported PDF-only");
             match pdf_fallback(
-                client.as_ref(),
-                converter.as_ref(),
-                &id,
-                convert_limit.clone(),
+                request.client.as_ref(),
+                state.converter.as_ref(),
+                &request.paper_id,
+                state.convert_limit.clone(),
+                request.provider_name,
             )
             .await
             {
@@ -181,13 +256,19 @@ pub async fn paper(
                 Err(resp) => return resp,
             }
         }
-        Err(err) => return map_arxiv_err("source_archive", &id, err),
+        Err(err) => {
+            return map_source_err(
+                request.provider_name,
+                "source_archive",
+                &request.paper_id,
+                err,
+            )
+        }
     };
 
-    // Enrich figure placeholders with arxiv HTML image links (addresses #1).
-    // Falls back gracefully (no links) if the paper has no HTML version.
-    let figure_urls = client
-        .get_html_figure_image_urls(&id)
+    let figure_urls = request
+        .client
+        .get_html_figure_image_urls(&request.paper_id)
         .await
         .unwrap_or_default();
     let body_md = add_arxiv_figure_html_links(&body_md, &figure_urls);
@@ -200,23 +281,17 @@ pub async fn paper(
         body_md
     };
 
-    cache.lock().await.put(cache_key.clone(), final_md.clone());
-    if let Some(dc) = &disk {
+    state
+        .cache
+        .lock()
+        .await
+        .put(cache_key.clone(), final_md.clone());
+    if let Some(dc) = &state.disk {
         if let Err(e) = dc.put(&cache_key, &final_md).await {
             tracing::error!(error = %e, cache_key = %cache_key, "disk cache write error");
         }
     }
-    markdown_response(final_md, &original_path)
-}
-
-fn normalize_id(raw: &str) -> &str {
-    if raw.len() >= 4 {
-        let cut = raw.len() - 4;
-        if raw.is_char_boundary(cut) && raw[cut..].eq_ignore_ascii_case(".pdf") {
-            return &raw[..cut];
-        }
-    }
-    raw
+    markdown_response(final_md, &request.content_location)
 }
 
 fn markdown_response(md: String, content_location: &str) -> Response {
@@ -231,22 +306,22 @@ fn markdown_response(md: String, content_location: &str) -> Response {
     (StatusCode::OK, headers, md).into_response()
 }
 
-fn map_arxiv_err(context: &str, id: &str, e: ArxivError) -> Response {
+fn map_source_err(provider_name: &str, context: &str, id: &str, e: PaperSourceError) -> Response {
     match e {
-        ArxivError::NotFound => {
-            tracing::warn!(paper_id = %id, context = %context, "arXiv resource not found");
+        PaperSourceError::NotFound => {
+            tracing::warn!(paper_id = %id, context = %context, provider = provider_name, "provider resource not found");
             (StatusCode::NOT_FOUND, "not found").into_response()
         }
-        ArxivError::PdfOnly => {
-            tracing::warn!(paper_id = %id, context = %context, "arXiv provided PDF-only asset");
+        PaperSourceError::PdfOnly => {
+            tracing::warn!(paper_id = %id, context = %context, provider = provider_name, "provider provided PDF-only asset");
             (StatusCode::UNPROCESSABLE_ENTITY, "Error: PDF only").into_response()
         }
-        ArxivError::Network(msg) => {
-            tracing::error!(paper_id = %id, context = %context, error = %msg, "arXiv network error");
+        PaperSourceError::Network(msg) => {
+            tracing::error!(paper_id = %id, context = %context, provider = provider_name, error = %msg, "provider network error");
             (StatusCode::BAD_GATEWAY, msg).into_response()
         }
-        ArxivError::NotImplemented => {
-            tracing::warn!(paper_id = %id, context = %context, "arXiv feature not implemented");
+        PaperSourceError::NotImplemented => {
+            tracing::warn!(paper_id = %id, context = %context, provider = provider_name, "provider feature not implemented");
             (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response()
         }
     }
@@ -266,14 +341,22 @@ fn map_convert_err(context: &str, id: &str, e: ConvertError) -> Response {
 }
 
 async fn pdf_fallback(
-    client: &(dyn ArxivClient + Send + Sync),
+    client: &(dyn PaperSource + Send + Sync),
     converter: &(dyn Converter + Send + Sync),
     id: &str,
     limit: Arc<Semaphore>,
+    provider_name: &str,
 ) -> Result<String, Response> {
     let pdf_bytes = match client.get_pdf(id).await {
         Ok(b) => b,
-        Err(err) => return Err(map_arxiv_err("pdf_fallback:get_pdf", id, err)),
+        Err(err) => {
+            return Err(map_source_err(
+                provider_name,
+                "pdf_fallback:get_pdf",
+                id,
+                err,
+            ))
+        }
     };
     let _permit = match limit.clone().acquire_owned().await {
         Ok(permit) => permit,
@@ -417,7 +500,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use tower::ServiceExt; // for `oneshot`
 
-    use crate::arxiv::test_helpers::MockArxivClient;
+    use crate::arxiv::{test_helpers::MockArxivClient, ArxivError};
     use crate::convert::test_helpers::MockConverter;
     use crate::state::AppState;
 
@@ -438,12 +521,15 @@ mod tests {
 
     #[test]
     fn normalize_id_strips_pdf_suffix_case_insensitively() {
-        assert_eq!(super::normalize_id("1234v1.PDF"), "1234v1");
+        assert_eq!(normalize_arxiv_id("1234v1.PDF").as_deref(), Some("1234v1"));
     }
 
     #[test]
     fn normalize_id_leaves_non_pdf_suffix() {
-        assert_eq!(super::normalize_id("1234v1.tar"), "1234v1.tar");
+        assert_eq!(
+            normalize_arxiv_id("1234v1.tar").as_deref(),
+            Some("1234v1.tar")
+        );
     }
 
     #[tokio::test]
@@ -468,8 +554,8 @@ mod tests {
     }
 
     #[test]
-    fn map_arxiv_err_translates_not_found() {
-        let resp = super::map_arxiv_err("metadata", "1234", ArxivError::NotFound);
+    fn map_source_err_translates_not_found() {
+        let resp = super::map_source_err("arXiv", "metadata", "1234", ArxivError::NotFound);
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
@@ -585,7 +671,7 @@ mod tests {
 
         let app = Router::new()
             .route("/abs/:id", get(super::paper))
-            .route("/pdf/:id", get(super::paper))
+            .route("/pdf/:id", get(super::pdf_paper))
             .with_state(state);
 
         let res = app
@@ -605,7 +691,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(cl, format!("/pdf/{}.pdf", id));
+        assert_eq!(cl, format!("/pdf/{}", id));
         assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
         assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
 
@@ -650,7 +736,7 @@ mod tests {
 
         let app = Router::new()
             .route("/abs/:id", get(super::paper))
-            .route("/pdf/:id", get(super::paper))
+            .route("/pdf/:id", get(super::pdf_paper))
             .with_state(state);
 
         let res = app
@@ -693,6 +779,70 @@ mod tests {
         assert_eq!(cl2, format!("/abs/{}", id));
         assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
         assert_eq!(archive_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn bio_route_normalizes_full_pdf_suffix_and_uses_separate_cache_namespace() {
+        let id = "10.1101/2024.01.02.123456v1";
+        let client = MockArxivClient::new(
+            Ok(true),
+            Err(ArxivError::PdfOnly),
+            Ok(Bytes::from_static(b"pdf-bytes")),
+            Ok(Metadata {
+                title: "Bio Paper".into(),
+                summary: "Abstract".into(),
+                authors: vec!["Author One".into()],
+            }),
+        );
+        let pdf_calls = client.pdf_calls.clone();
+        let converter = MockConverter::new(Ok(String::new()), Ok("bio pdf text".into()));
+        let state = AppState::new_with_clients(
+            8,
+            MockArxivClient::new(
+                Ok(true),
+                Err(ArxivError::NotImplemented),
+                Err(ArxivError::NotImplemented),
+                Err(ArxivError::NotImplemented),
+            ),
+            client,
+            converter,
+            None,
+        );
+
+        let app = Router::new()
+            .route("/bio/*id", get(super::bio_paper))
+            .with_state(state);
+
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/bio/{}.full.pdf", id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cl = res
+            .headers()
+            .get(axum::http::header::CONTENT_LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cl, format!("/bio/{}", id));
+
+        let res2 = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/bio/{}.full", id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res2.status(), StatusCode::OK);
+        assert_eq!(pdf_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

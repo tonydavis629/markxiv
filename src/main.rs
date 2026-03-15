@@ -6,6 +6,7 @@ use axum::{routing::get, Router};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnResponse, TraceLayer};
 
 use markxiv::arxiv::ReqwestArxivClient;
+use markxiv::biorxiv::ReqwestBiorxivClient;
 use markxiv::convert::PandocConverter;
 use markxiv::disk_cache::{DiskCache, DiskCacheConfig};
 use markxiv::routes;
@@ -134,7 +135,8 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(128);
 
-    let client = ReqwestArxivClient::new();
+    let arxiv_client = ReqwestArxivClient::new();
+    let biorxiv_client = ReqwestBiorxivClient::new();
     let converter = PandocConverter::new();
 
     // Optional disk cache
@@ -166,13 +168,15 @@ async fn main() {
         None
     };
 
-    let state = AppState::new(cache_cap, client, converter, disk);
+    let state =
+        AppState::new_with_clients(cache_cap, arxiv_client, biorxiv_client, converter, disk);
 
     let app = Router::new()
         .route("/", get(routes::index))
         .route("/health", get(routes::health))
         .route("/abs/:id", get(routes::paper))
-        .route("/pdf/:id", get(routes::paper))
+        .route("/pdf/:id", get(routes::pdf_paper))
+        .route("/bio/*id", get(routes::bio_paper))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))

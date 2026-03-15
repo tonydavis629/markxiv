@@ -1,6 +1,6 @@
 # markxiv-mcp
 
-A Rust MCP (Model Context Protocol) server that converts arXiv papers to markdown using the markxiv library directly — no web service dependency.
+A Rust MCP (Model Context Protocol) server that converts arXiv and bioRxiv papers to markdown using the markxiv library directly — no web service dependency.
 
 Unlike other arXiv MCP servers that scrape HTML or call APIs, this one uses markxiv's pandoc-based conversion pipeline locally for the highest fidelity LaTeX-to-markdown output.
 
@@ -88,23 +88,31 @@ Or if installed via `cargo install`:
 
 ### `convert_paper`
 
-Convert an arXiv paper to markdown. Fetches the LaTeX source, converts via pandoc, and returns clean GitHub-Flavored Markdown with title, authors, and abstract prepended. Falls back to PDF text extraction when no LaTeX source is available.
+Convert an arXiv or bioRxiv paper to markdown. markxiv prefers LaTeX source when available and falls back to PDF text extraction when no source is available. bioRxiv currently uses the PDF-first path.
 
 **Parameters:**
-- `paper_id` (string, required) — arXiv paper ID (e.g. `"1706.03762"` or `"2301.07041v1"`)
+- `paper_id` (string, required) — paper ID or URL
+- `provider` (string, optional) — `"arxiv"` or `"biorxiv"`; usually unnecessary because the server can infer the provider from the input
 
-**Example:** "Convert the Attention Is All You Need paper" → calls `convert_paper` with `paper_id: "1706.03762"`
+Accepted examples:
+- `"1706.03762"`
+- `"https://arxiv.org/abs/1706.03762"`
+- `"10.1101/2024.01.02.123456v1.full.pdf"`
+- `"https://www.biorxiv.org/content/10.1101/2024.01.02.123456v1.full"`
 
 ### `get_paper_metadata`
 
-Get metadata (title, authors, abstract) for an arXiv paper without converting the full content. Useful for quick lookups.
+Get metadata (title, authors, abstract) for an arXiv or bioRxiv paper without converting the full content. Useful for quick lookups.
 
 **Parameters:**
-- `paper_id` (string, required) — arXiv paper ID
+- `paper_id` (string, required) — paper ID or URL
+- `provider` (string, optional) — `"arxiv"` or `"biorxiv"`
 
 ### `search_papers`
 
 Search arXiv papers by keyword query. Returns matching papers with IDs, titles, authors, and abstracts.
+
+This tool remains arXiv-only.
 
 **Parameters:**
 - `query` (string, required) — Search query (e.g. `"transformer architecture"`)

@@ -4,18 +4,22 @@ Just replace 'arxiv' in the URL with 'markxiv' to get the markdown
 
 https://arxiv.org/abs/1706.03762 → https://markxiv.org/abs/1706.03762
 
+bioRxiv is also supported through the `/bio/` route family:
+
+https://www.biorxiv.org/content/10.1101/2024.01.02.123456v1.full → https://markxiv.org/bio/10.1101/2024.01.02.123456v1.full
+
 ## Basics
 
 A minimal web service that mimics arXiv but serves Markdown instead of PDFs/HTML.
 
-Given an arXiv ID, the server:
+Given an arXiv or bioRxiv paper identifier, the server:
 - Checks a local LRU cache for a converted result
-- Fetches the paper’s LaTeX source from arXiv (if available)
+- Fetches the paper’s LaTeX source when available
 - Extracts the archive, picks the main `.tex` file, converts it to Markdown using pandoc
 - Falls back to `pdftotext` when LaTeX sources are unavailable or pandoc conversion fails
 - Returns `text/markdown; charset=utf-8`
 
-If a paper is PDF-only (no source available) or pandoc conversion fails, the server falls back to `pdftotext` and returns the extracted Markdown/plain text when that succeeds.
+If a paper is PDF-only (no source available) or pandoc conversion fails, the server falls back to `pdftotext` and returns the extracted Markdown/plain text when that succeeds. bioRxiv currently uses that PDF-first path by design.
 
 Returned Markdown includes the paper title and abstract prepended at the top.
 
@@ -112,11 +116,15 @@ Environment variables:
   - Two-tier caching: in-memory LRU first, then on-disk gzip store; cache populated on miss
 - `GET /pdf/:id[?refresh=1]` → same response as `/abs/:id`, useful for links that expect the `/pdf/` prefix
   - Requests like `/pdf/:id.pdf` are normalized automatically
+- `GET /bio/*id[?refresh=1]` → bioRxiv conversion endpoint with `text/markdown`
+  - Accepts canonical bioRxiv identifiers such as `10.1101/2024.01.02.123456v1`, plus `.full` and `.full.pdf` variants
+  - Uses a wildcard route because bioRxiv identifiers contain `/`
+  - Uses the same cache/conversion pipeline as arXiv, but bioRxiv is currently PDF-first
 
 Error mapping:
-- `404 Not Found` — unknown arXiv id
+- `404 Not Found` — unknown paper id at the selected provider
 - `422 Unprocessable Entity` — PDF only (no e-print source) and the `pdftotext` fallback also failed
-- `502 Bad Gateway` — upstream/network error contacting arXiv
+- `502 Bad Gateway` — upstream/network error contacting the paper provider
 - `500 Internal Server Error` — conversion/extraction errors
 
 ## Development
@@ -131,14 +139,17 @@ Project layout:
 - `src/routes.rs` — handlers (`/`, `/health`, `/abs/:id`, `/pdf/:id`)
 - `src/state.rs` — shared state (LRU cache + clients)
 - `src/cache.rs` — thin wrapper around `lru::LruCache`
-- `src/arxiv.rs` — arXiv client + metadata fetch via Atom API
+- `src/arxiv.rs` — arXiv client + shared paper-source abstractions
+- `src/biorxiv.rs` — bioRxiv client + identifier normalization
 - `src/convert.rs` — pandoc-based converter + sanitization
 - `src/tex_main.rs` — heuristic for picking the main `.tex` file
 
 ### How it works
 
-- Metadata (title, abstract): `https://export.arxiv.org/api/query?id_list=:id` (Atom feed), minimal parse of `<entry><title>` and `<summary>`.
-- Source archive: `https://arxiv.org/e-print/:id` (tar/tar.gz). 400/403/404 → treated as PDF-only.
+- arXiv metadata (title, abstract): `https://export.arxiv.org/api/query?id_list=:id` (Atom feed), minimal parse of `<entry><title>` and `<summary>`.
+- arXiv source archive: `https://arxiv.org/e-print/:id` (tar/tar.gz). 400/403/404 → treated as PDF-only.
+- bioRxiv metadata: article-page meta tags on `https://www.biorxiv.org/content/:id.full`.
+- bioRxiv source policy: PDF-first. The server does not currently assume a LaTeX source archive exists upstream.
 - Conversion: save archive to temp dir → extract with `tar` → pick main `.tex` → `pandoc -f latex -t gfm` → sanitize.
 - Fallback: when LaTeX sources are unavailable or pandoc fails, download the PDF and shell out to `pdftotext -raw`.
 - Sanitization: remove entire `<figure>...</figure>` blocks and strip all remaining HTML tags from the Markdown output.
@@ -159,6 +170,9 @@ curl -sH 'Accept: text/markdown' http://localhost:8080/
 # fetch a paper (replace with a source-available id)
 curl -sH 'Accept: text/markdown' http://localhost:8080/abs/1601.00001
 
+# fetch a bioRxiv paper
+curl -sH 'Accept: text/markdown' http://localhost:8080/bio/10.1101/2024.01.02.123456v1.full
+
 # force refresh (bypass cache)
 curl -s http://localhost:8080/abs/1601.00001?refresh=1
 
@@ -168,9 +182,11 @@ MARKXIV_DISK_CACHE_CAP_BYTES=$((10*1024*1024*1024)) cargo run
 
 ## MCP Server
 
-markxiv includes an MCP (Model Context Protocol) server that lets Claude and other AI assistants convert arXiv papers to markdown directly using the markxiv library — no web service needed.
+markxiv includes an MCP (Model Context Protocol) server that lets Claude and other AI assistants convert arXiv and bioRxiv papers to markdown directly using the markxiv library — no web service needed.
 
 **Tools:** `convert_paper`, `get_paper_metadata`, `search_papers`
+
+`search_papers` remains arXiv-only in this phase.
 
 Build:
 ```bash

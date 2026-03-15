@@ -154,3 +154,108 @@ async fn refresh_query_triggers_pdf_fallback() {
     assert_eq!(latex_nomacro_calls.load(Ordering::SeqCst), 2);
     assert_eq!(converter_pdf_calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn biorxiv_route_uses_canonical_cache_key_and_reuses_disk_cache() {
+    let root = tmp_dir("biorxiv-disk-cache");
+    let cfg = DiskCacheConfig {
+        root: root.clone(),
+        cap_bytes: 1_000_000,
+        sweep_interval: Duration::from_secs(600),
+    };
+    let disk = DiskCache::new(cfg).await.unwrap();
+    let bio_id = "10.1101/2024.01.02.123456v1";
+
+    let arxiv_client = MockArxivClient::new(
+        Ok(true),
+        Err(ArxivError::NotImplemented),
+        Err(ArxivError::NotImplemented),
+        Err(ArxivError::NotImplemented),
+    );
+    let biorxiv_client = MockArxivClient::new(
+        Ok(true),
+        Err(ArxivError::PdfOnly),
+        Ok(Bytes::from_static(b"pdf-bytes")),
+        Ok(Metadata {
+            title: "Bio paper".into(),
+            summary: "Bio abstract".into(),
+            authors: vec!["Bio Author".into()],
+        }),
+    );
+    let pdf_calls = biorxiv_client.pdf_calls.clone();
+    let converter = MockConverter::new(Ok(String::new()), Ok("bio body".into()));
+
+    let state1 = AppState::new_with_clients(
+        8,
+        arxiv_client,
+        biorxiv_client,
+        converter,
+        Some(disk.clone()),
+    );
+    let app1 = Router::new()
+        .route("/bio/*id", get(routes::bio_paper))
+        .with_state(state1);
+
+    let res1 = app1
+        .oneshot(
+            Request::builder()
+                .uri(format!("/bio/{}.full.pdf", bio_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        res1.headers()
+            .get(axum::http::header::CONTENT_LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/bio/{}", bio_id).as_str())
+    );
+    let body1 = to_bytes(res1.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body1.as_ref(), b"bio body");
+    assert_eq!(pdf_calls.load(Ordering::SeqCst), 1);
+
+    let arxiv_client2 = MockArxivClient::new(
+        Ok(true),
+        Err(ArxivError::NotImplemented),
+        Err(ArxivError::NotImplemented),
+        Err(ArxivError::NotImplemented),
+    );
+    let biorxiv_client2 = MockArxivClient::new(
+        Ok(true),
+        Err(ArxivError::Network("should not fetch".into())),
+        Err(ArxivError::Network("should not fetch".into())),
+        Err(ArxivError::Network("should not fetch".into())),
+    );
+    let pdf_calls2 = biorxiv_client2.pdf_calls.clone();
+    let state2 = AppState::new_with_clients(
+        8,
+        arxiv_client2,
+        biorxiv_client2,
+        MockConverter::new(
+            Err(ConvertError::Failed("should not convert".into())),
+            Err(ConvertError::Failed("should not convert".into())),
+        ),
+        Some(disk.clone()),
+    );
+    let app2 = Router::new()
+        .route("/bio/*id", get(routes::bio_paper))
+        .with_state(state2);
+
+    let res2 = app2
+        .oneshot(
+            Request::builder()
+                .uri(format!("/bio/{}.full", bio_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res2.status(), axum::http::StatusCode::OK);
+    let body2 = to_bytes(res2.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body2.as_ref(), b"bio body");
+    assert_eq!(pdf_calls2.load(Ordering::SeqCst), 0);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}

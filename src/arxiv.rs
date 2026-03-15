@@ -4,7 +4,7 @@ use reqwest::Url;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error)]
-pub enum ArxivError {
+pub enum PaperSourceError {
     #[error("not found")]
     NotFound,
     #[error("pdf only")]
@@ -15,24 +15,30 @@ pub enum ArxivError {
     NotImplemented,
 }
 
+pub type ArxivError = PaperSourceError;
+
 #[async_trait]
-pub trait ArxivClient {
-    async fn exists(&self, id: &str) -> Result<bool, ArxivError>;
-    async fn get_source_archive(&self, id: &str) -> Result<Bytes, ArxivError>;
-    async fn get_pdf(&self, id: &str) -> Result<Bytes, ArxivError>;
-    async fn get_metadata(&self, id: &str) -> Result<Metadata, ArxivError>;
+pub trait PaperSource {
+    async fn exists(&self, id: &str) -> Result<bool, PaperSourceError>;
+    async fn get_source_archive(&self, id: &str) -> Result<Bytes, PaperSourceError>;
+    async fn get_pdf(&self, id: &str) -> Result<Bytes, PaperSourceError>;
+    async fn get_metadata(&self, id: &str) -> Result<Metadata, PaperSourceError>;
     async fn search(
         &self,
         _query: &str,
         _max_results: u32,
-    ) -> Result<Vec<SearchResult>, ArxivError> {
-        Err(ArxivError::NotImplemented)
+    ) -> Result<Vec<SearchResult>, PaperSourceError> {
+        Err(PaperSourceError::NotImplemented)
     }
 
-    async fn get_html_figure_image_urls(&self, _id: &str) -> Result<Vec<String>, ArxivError> {
+    async fn get_html_figure_image_urls(&self, _id: &str) -> Result<Vec<String>, PaperSourceError> {
         Ok(vec![])
     }
 }
+
+pub trait ArxivClient: PaperSource {}
+
+impl<T: PaperSource + ?Sized> ArxivClient for T {}
 
 pub struct ReqwestArxivClient {
     http: reqwest::Client,
@@ -50,19 +56,19 @@ impl ReqwestArxivClient {
 }
 
 #[async_trait]
-impl ArxivClient for ReqwestArxivClient {
-    async fn exists(&self, id: &str) -> Result<bool, ArxivError> {
+impl PaperSource for ReqwestArxivClient {
+    async fn exists(&self, id: &str) -> Result<bool, PaperSourceError> {
         let url = Url::parse_with_params("https://export.arxiv.org/api/query", &[("id_list", id)])
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
         let res = self
             .http
             .get(url)
             .header(reqwest::header::ACCEPT, "application/atom+xml")
             .send()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
         if !res.status().is_success() {
-            return Err(ArxivError::Network(format!(
+            return Err(PaperSourceError::Network(format!(
                 "arXiv exists check HTTP {}",
                 res.status()
             )));
@@ -70,12 +76,12 @@ impl ArxivClient for ReqwestArxivClient {
         let body = res
             .text()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
         // Minimal parse: an empty feed has no <entry>; existing id yields at least one <entry>
         Ok(body.contains("<entry"))
     }
 
-    async fn get_source_archive(&self, id: &str) -> Result<Bytes, ArxivError> {
+    async fn get_source_archive(&self, id: &str) -> Result<Bytes, PaperSourceError> {
         let url = format!("https://arxiv.org/e-print/{}", id);
         let res = self
             .http
@@ -86,7 +92,7 @@ impl ArxivClient for ReqwestArxivClient {
             )
             .send()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
 
         let status = res.status();
         if status.is_success() {
@@ -101,15 +107,15 @@ impl ArxivClient for ReqwestArxivClient {
             let bytes = res
                 .bytes()
                 .await
-                .map_err(|e| ArxivError::Network(e.to_string()))?;
+                .map_err(|e| PaperSourceError::Network(e.to_string()))?;
 
             // If arXiv returns a PDF (no source available), map to PdfOnly
             if content_type.contains("application/pdf") || looks_like_pdf(&bytes) {
-                return Err(ArxivError::PdfOnly);
+                return Err(PaperSourceError::PdfOnly);
             }
             // Some upstream issues (e.g., HTML error pages) can slip through as 200s
             if content_type.contains("text/html") || looks_like_html(&bytes) {
-                return Err(ArxivError::Network(
+                return Err(PaperSourceError::Network(
                     "arXiv returned HTML when requesting e-print".into(),
                 ));
             }
@@ -118,15 +124,15 @@ impl ArxivClient for ReqwestArxivClient {
         }
         // Common cases: 400/403/404 when no source available → treat as PDF only
         if status.as_u16() == 400 || status.as_u16() == 403 || status.as_u16() == 404 {
-            return Err(ArxivError::PdfOnly);
+            return Err(PaperSourceError::PdfOnly);
         }
-        Err(ArxivError::Network(format!(
+        Err(PaperSourceError::Network(format!(
             "arXiv e-print HTTP {}",
             status
         )))
     }
 
-    async fn get_pdf(&self, id: &str) -> Result<Bytes, ArxivError> {
+    async fn get_pdf(&self, id: &str) -> Result<Bytes, PaperSourceError> {
         let url = format!("https://arxiv.org/pdf/{}.pdf", id);
         let res = self
             .http
@@ -134,45 +140,48 @@ impl ArxivClient for ReqwestArxivClient {
             .header(reqwest::header::ACCEPT, "application/pdf")
             .send()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
 
         let status = res.status();
         if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(ArxivError::NotFound);
+            return Err(PaperSourceError::NotFound);
         }
         if !status.is_success() {
-            return Err(ArxivError::Network(format!("arXiv pdf HTTP {}", status)));
+            return Err(PaperSourceError::Network(format!(
+                "arXiv pdf HTTP {}",
+                status
+            )));
         }
 
         let bytes = res
             .bytes()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
 
         if looks_like_pdf(&bytes) {
             Ok(bytes)
         } else {
-            Err(ArxivError::Network(
+            Err(PaperSourceError::Network(
                 "unexpected non-PDF payload when requesting PDF".into(),
             ))
         }
     }
 
-    async fn get_metadata(&self, id: &str) -> Result<Metadata, ArxivError> {
+    async fn get_metadata(&self, id: &str) -> Result<Metadata, PaperSourceError> {
         let url = Url::parse_with_params("https://export.arxiv.org/api/query", &[("id_list", id)])
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
         let res = self
             .http
             .get(url)
             .header(reqwest::header::ACCEPT, "application/atom+xml")
             .send()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
         if res.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(ArxivError::NotFound);
+            return Err(PaperSourceError::NotFound);
         }
         if !res.status().is_success() {
-            return Err(ArxivError::Network(format!(
+            return Err(PaperSourceError::Network(format!(
                 "arXiv metadata HTTP {}",
                 res.status()
             )));
@@ -180,15 +189,15 @@ impl ArxivClient for ReqwestArxivClient {
         let body = res
             .text()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
-        parse_atom_metadata(&body).ok_or(ArxivError::NotFound)
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
+        parse_atom_metadata(&body).ok_or(PaperSourceError::NotFound)
     }
 
     async fn search(
         &self,
         query: &str,
         max_results: u32,
-    ) -> Result<Vec<SearchResult>, ArxivError> {
+    ) -> Result<Vec<SearchResult>, PaperSourceError> {
         let max_results = max_results.min(50);
         let url = Url::parse_with_params(
             "https://export.arxiv.org/api/query",
@@ -198,7 +207,7 @@ impl ArxivClient for ReqwestArxivClient {
                 ("max_results", &max_results.to_string()),
             ],
         )
-        .map_err(|e| ArxivError::Network(e.to_string()))?;
+        .map_err(|e| PaperSourceError::Network(e.to_string()))?;
 
         let res = self
             .http
@@ -206,10 +215,10 @@ impl ArxivClient for ReqwestArxivClient {
             .header(reqwest::header::ACCEPT, "application/atom+xml")
             .send()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
 
         if !res.status().is_success() {
-            return Err(ArxivError::Network(format!(
+            return Err(PaperSourceError::Network(format!(
                 "arXiv search HTTP {}",
                 res.status()
             )));
@@ -218,27 +227,68 @@ impl ArxivClient for ReqwestArxivClient {
         let body = res
             .text()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
 
         Ok(parse_atom_search_results(&body))
     }
 
-    async fn get_html_figure_image_urls(&self, id: &str) -> Result<Vec<String>, ArxivError> {
+    async fn get_html_figure_image_urls(&self, id: &str) -> Result<Vec<String>, PaperSourceError> {
         let base_url = format!("https://arxiv.org/html/{}", id);
         let res = self
             .http
             .get(&base_url)
             .send()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
         if !res.status().is_success() {
             return Ok(vec![]);
         }
         let html = res
             .text()
             .await
-            .map_err(|e| ArxivError::Network(e.to_string()))?;
+            .map_err(|e| PaperSourceError::Network(e.to_string()))?;
         Ok(parse_html_figure_image_urls(&html, &base_url))
+    }
+}
+
+pub fn normalize_arxiv_id(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let candidate = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        let url = Url::parse(trimmed).ok()?;
+        let host = url.host_str()?.to_ascii_lowercase();
+        if !host.ends_with("arxiv.org") {
+            return None;
+        }
+        let path = url.path().trim_matches('/');
+        path.strip_prefix("abs/")
+            .or_else(|| path.strip_prefix("pdf/"))
+            .or_else(|| path.strip_prefix("html/"))
+            .unwrap_or(path)
+            .to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    let candidate = strip_ascii_suffix(&candidate, ".pdf").unwrap_or(&candidate);
+    if candidate.is_empty() || !candidate.is_ascii() {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+fn strip_ascii_suffix<'a>(input: &'a str, suffix: &str) -> Option<&'a str> {
+    if input.len() < suffix.len() {
+        return None;
+    }
+    let cut = input.len() - suffix.len();
+    if input.is_char_boundary(cut) && input[cut..].eq_ignore_ascii_case(suffix) {
+        Some(&input[..cut])
+    } else {
+        None
     }
 }
 
@@ -287,11 +337,7 @@ fn parse_atom_search_results(atom: &str) -> Vec<SearchResult> {
             .trim()
             .to_string();
         // Extract arXiv ID from full URL (e.g. "http://arxiv.org/abs/1706.03762v5" → "1706.03762v5")
-        let arxiv_id = id
-            .rsplit('/')
-            .next()
-            .unwrap_or(&id)
-            .to_string();
+        let arxiv_id = id.rsplit('/').next().unwrap_or(&id).to_string();
 
         if !title.is_empty() {
             results.push(SearchResult {
@@ -395,7 +441,10 @@ fn resolve_figure_img_url(base_url: &str, src: &str) -> String {
     // arXiv HTML pages can reference figure images as "<paper-id>vN/Figures/..."
     // even when the page URL is "/html/<paper-id>". In that case, joining with
     // "/html/<paper-id>/" duplicates the id segment, so anchor at "/html/".
-    if let Some(base_id) = base_url.path_segments().and_then(|mut segs| segs.next_back()) {
+    if let Some(base_id) = base_url
+        .path_segments()
+        .and_then(|mut segs| segs.next_back())
+    {
         let base_id_no_version = strip_version_suffix(base_id);
         let version_prefixed = src_trimmed.starts_with(&(base_id.to_string() + "/"))
             || src_trimmed.starts_with(&(base_id_no_version.to_string() + "v"));
@@ -573,13 +622,13 @@ pub mod test_helpers {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    pub struct MockArxivClient {
-        pub exists_response: Result<bool, ArxivError>,
-        pub archive_response: Result<Bytes, ArxivError>,
-        pub pdf_response: Result<Bytes, ArxivError>,
-        pub metadata_response: Result<Metadata, ArxivError>,
-        pub search_response: Result<Vec<SearchResult>, ArxivError>,
-        pub html_figure_urls_response: Result<Vec<String>, ArxivError>,
+    pub struct MockPaperSourceClient {
+        pub exists_response: Result<bool, PaperSourceError>,
+        pub archive_response: Result<Bytes, PaperSourceError>,
+        pub pdf_response: Result<Bytes, PaperSourceError>,
+        pub metadata_response: Result<Metadata, PaperSourceError>,
+        pub search_response: Result<Vec<SearchResult>, PaperSourceError>,
+        pub html_figure_urls_response: Result<Vec<String>, PaperSourceError>,
         pub exists_calls: Arc<AtomicUsize>,
         pub archive_calls: Arc<AtomicUsize>,
         pub pdf_calls: Arc<AtomicUsize>,
@@ -587,12 +636,14 @@ pub mod test_helpers {
         pub search_calls: Arc<AtomicUsize>,
     }
 
-    impl MockArxivClient {
+    pub type MockArxivClient = MockPaperSourceClient;
+
+    impl MockPaperSourceClient {
         pub fn new(
-            exists_response: Result<bool, ArxivError>,
-            archive_response: Result<Bytes, ArxivError>,
-            pdf_response: Result<Bytes, ArxivError>,
-            metadata_response: Result<Metadata, ArxivError>,
+            exists_response: Result<bool, PaperSourceError>,
+            archive_response: Result<Bytes, PaperSourceError>,
+            pdf_response: Result<Bytes, PaperSourceError>,
+            metadata_response: Result<Metadata, PaperSourceError>,
         ) -> Self {
             Self {
                 exists_response,
@@ -611,23 +662,23 @@ pub mod test_helpers {
     }
 
     #[async_trait]
-    impl ArxivClient for MockArxivClient {
-        async fn exists(&self, _id: &str) -> Result<bool, ArxivError> {
+    impl PaperSource for MockPaperSourceClient {
+        async fn exists(&self, _id: &str) -> Result<bool, PaperSourceError> {
             self.exists_calls.fetch_add(1, Ordering::SeqCst);
             self.exists_response.clone()
         }
 
-        async fn get_source_archive(&self, _id: &str) -> Result<Bytes, ArxivError> {
+        async fn get_source_archive(&self, _id: &str) -> Result<Bytes, PaperSourceError> {
             self.archive_calls.fetch_add(1, Ordering::SeqCst);
             self.archive_response.clone()
         }
 
-        async fn get_pdf(&self, _id: &str) -> Result<Bytes, ArxivError> {
+        async fn get_pdf(&self, _id: &str) -> Result<Bytes, PaperSourceError> {
             self.pdf_calls.fetch_add(1, Ordering::SeqCst);
             self.pdf_response.clone()
         }
 
-        async fn get_metadata(&self, _id: &str) -> Result<Metadata, ArxivError> {
+        async fn get_metadata(&self, _id: &str) -> Result<Metadata, PaperSourceError> {
             self.metadata_calls.fetch_add(1, Ordering::SeqCst);
             self.metadata_response.clone()
         }
@@ -636,12 +687,15 @@ pub mod test_helpers {
             &self,
             _query: &str,
             _max_results: u32,
-        ) -> Result<Vec<SearchResult>, ArxivError> {
+        ) -> Result<Vec<SearchResult>, PaperSourceError> {
             self.search_calls.fetch_add(1, Ordering::SeqCst);
             self.search_response.clone()
         }
 
-        async fn get_html_figure_image_urls(&self, _id: &str) -> Result<Vec<String>, ArxivError> {
+        async fn get_html_figure_image_urls(
+            &self,
+            _id: &str,
+        ) -> Result<Vec<String>, PaperSourceError> {
             self.html_figure_urls_response.clone()
         }
     }

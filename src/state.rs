@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use axum::extract::FromRef;
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::arxiv::ArxivClient;
+use async_trait::async_trait;
+
+use crate::arxiv::{Metadata, PaperSource, PaperSourceError};
 use crate::cache::MkCache;
 use crate::convert::Converter;
 use crate::disk_cache::DiskCache;
@@ -11,7 +12,8 @@ use crate::disk_cache::DiskCache;
 #[derive(Clone)]
 pub struct AppState {
     pub cache: Arc<Mutex<MkCache>>,
-    pub client: Arc<dyn ArxivClient + Send + Sync>,
+    pub arxiv_client: Arc<dyn PaperSource + Send + Sync>,
+    pub biorxiv_client: Arc<dyn PaperSource + Send + Sync>,
     pub converter: Arc<dyn Converter + Send + Sync>,
     pub disk: Option<Arc<DiskCache>>,
     pub convert_limit: Arc<Semaphore>,
@@ -20,13 +22,29 @@ pub struct AppState {
 impl AppState {
     pub fn new<C, V>(cap: usize, client: C, converter: V, disk: Option<Arc<DiskCache>>) -> Self
     where
-        C: ArxivClient + Send + Sync + 'static,
+        C: PaperSource + Send + Sync + 'static,
+        V: Converter + Send + Sync + 'static,
+    {
+        Self::new_with_clients(cap, client, NullPaperSourceClient, converter, disk)
+    }
+
+    pub fn new_with_clients<A, B, V>(
+        cap: usize,
+        arxiv_client: A,
+        biorxiv_client: B,
+        converter: V,
+        disk: Option<Arc<DiskCache>>,
+    ) -> Self
+    where
+        A: PaperSource + Send + Sync + 'static,
+        B: PaperSource + Send + Sync + 'static,
         V: Converter + Send + Sync + 'static,
     {
         let permits = num_cpus::get().max(1);
         Self {
             cache: Arc::new(Mutex::new(MkCache::new(cap))),
-            client: Arc::new(client),
+            arxiv_client: Arc::new(arxiv_client),
+            biorxiv_client: Arc::new(biorxiv_client),
             converter: Arc::new(converter),
             disk,
             convert_limit: Arc::new(Semaphore::new(permits)),
@@ -34,32 +52,23 @@ impl AppState {
     }
 }
 
-impl FromRef<AppState> for Arc<Mutex<MkCache>> {
-    fn from_ref(input: &AppState) -> Self {
-        input.cache.clone()
-    }
-}
+struct NullPaperSourceClient;
 
-impl FromRef<AppState> for Arc<dyn ArxivClient + Send + Sync> {
-    fn from_ref(input: &AppState) -> Self {
-        input.client.clone()
+#[async_trait]
+impl PaperSource for NullPaperSourceClient {
+    async fn exists(&self, _id: &str) -> Result<bool, PaperSourceError> {
+        Ok(false)
     }
-}
 
-impl FromRef<AppState> for Arc<dyn Converter + Send + Sync> {
-    fn from_ref(input: &AppState) -> Self {
-        input.converter.clone()
+    async fn get_source_archive(&self, _id: &str) -> Result<bytes::Bytes, PaperSourceError> {
+        Err(PaperSourceError::NotImplemented)
     }
-}
 
-impl FromRef<AppState> for Option<Arc<DiskCache>> {
-    fn from_ref(input: &AppState) -> Self {
-        input.disk.clone()
+    async fn get_pdf(&self, _id: &str) -> Result<bytes::Bytes, PaperSourceError> {
+        Err(PaperSourceError::NotImplemented)
     }
-}
 
-impl FromRef<AppState> for Arc<Semaphore> {
-    fn from_ref(input: &AppState) -> Self {
-        input.convert_limit.clone()
+    async fn get_metadata(&self, _id: &str) -> Result<Metadata, PaperSourceError> {
+        Err(PaperSourceError::NotImplemented)
     }
 }

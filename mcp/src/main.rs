@@ -1,7 +1,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use markxiv::arxiv::{ArxivClient, ArxivError, ReqwestArxivClient};
+use markxiv::arxiv::{
+    normalize_arxiv_id, ArxivClient, ArxivError, PaperSource, ReqwestArxivClient,
+};
+use markxiv::biorxiv::{biorxiv_article_url, normalize_biorxiv_id, ReqwestBiorxivClient};
 use markxiv::convert::{ConvertError, Converter, PandocConverter};
 use rmcp::{
     handler::server::router::tool::ToolRouter,
@@ -14,14 +17,18 @@ use rmcp::{
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ConvertPaperParams {
-    #[schemars(description = "arXiv paper ID (e.g. '1706.03762' or '2301.07041v1')")]
+    #[schemars(description = "Paper ID or URL. Supports arXiv IDs/URLs and bioRxiv IDs/URLs.")]
     paper_id: String,
+    #[schemars(description = "Optional provider override: 'arxiv' or 'biorxiv'")]
+    provider: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct GetMetadataParams {
-    #[schemars(description = "arXiv paper ID (e.g. '1706.03762')")]
+    #[schemars(description = "Paper ID or URL. Supports arXiv IDs/URLs and bioRxiv IDs/URLs.")]
     paper_id: String,
+    #[schemars(description = "Optional provider override: 'arxiv' or 'biorxiv'")]
+    provider: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -43,7 +50,8 @@ fn default_max_results() -> Option<u32> {
 
 #[derive(Clone)]
 struct MarkxivMcp {
-    client: Arc<ReqwestArxivClient>,
+    arxiv_client: Arc<ReqwestArxivClient>,
+    biorxiv_client: Arc<ReqwestBiorxivClient>,
     converter: Arc<PandocConverter>,
     tool_router: ToolRouter<Self>,
 }
@@ -58,32 +66,32 @@ impl fmt::Debug for MarkxivMcp {
 impl MarkxivMcp {
     fn new() -> Self {
         Self {
-            client: Arc::new(ReqwestArxivClient::new()),
+            arxiv_client: Arc::new(ReqwestArxivClient::new()),
+            biorxiv_client: Arc::new(ReqwestBiorxivClient::new()),
             converter: Arc::new(PandocConverter::new()),
             tool_router: Self::tool_router(),
         }
     }
 
-    #[tool(description = "Convert an arXiv paper to markdown. Returns the full paper content with title, authors, and abstract.")]
+    #[tool(
+        description = "Convert an arXiv or bioRxiv paper to markdown. Returns the full paper content with title, authors, and abstract when available."
+    )]
     async fn convert_paper(
         &self,
         Parameters(params): Parameters<ConvertPaperParams>,
     ) -> Result<String, String> {
-        let paper_id = params.paper_id.trim().to_string();
-        if paper_id.is_empty() || !paper_id.is_ascii() {
-            return Err("invalid paper ID".into());
-        }
+        let resolved = resolve_paper_input(&params.paper_id, params.provider.as_deref())?;
 
-        // Fetch metadata
-        let metadata = match self.client.get_metadata(&paper_id).await {
+        let (client, paper_id) = self.provider_client(&resolved);
+
+        let metadata = match client.get_metadata(&paper_id).await {
             Ok(m) => Some(m),
             Err(ArxivError::NotFound) => return Err(format!("paper '{}' not found", paper_id)),
             Err(ArxivError::NotImplemented) => None,
             Err(e) => return Err(format!("metadata fetch failed: {}", e)),
         };
 
-        // Try LaTeX source first
-        let (body, used_pdf) = match self.client.get_source_archive(&paper_id).await {
+        let (body, used_pdf) = match client.get_source_archive(&paper_id).await {
             Ok(bytes) => match self.converter.latex_tar_to_markdown(&bytes).await {
                 Ok(md) => (md, false),
                 Err(_) => {
@@ -93,11 +101,11 @@ impl MarkxivMcp {
                         .await
                     {
                         Ok(md) => (md, false),
-                        Err(_) => self.try_pdf_fallback(&paper_id).await?,
+                        Err(_) => self.try_pdf_fallback(&resolved).await?,
                     }
                 }
             },
-            Err(ArxivError::PdfOnly) => self.try_pdf_fallback(&paper_id).await?,
+            Err(ArxivError::PdfOnly) => self.try_pdf_fallback(&resolved).await?,
             Err(ArxivError::NotFound) => return Err(format!("paper '{}' not found", paper_id)),
             Err(e) => return Err(format!("source fetch failed: {}", e)),
         };
@@ -127,18 +135,17 @@ impl MarkxivMcp {
         Ok(body)
     }
 
-    #[tool(description = "Get metadata (title, authors, abstract) for an arXiv paper without converting the full content.")]
+    #[tool(
+        description = "Get metadata (title, authors, abstract) for an arXiv or bioRxiv paper without converting the full content."
+    )]
     async fn get_paper_metadata(
         &self,
         Parameters(params): Parameters<GetMetadataParams>,
     ) -> Result<String, String> {
-        let paper_id = params.paper_id.trim().to_string();
-        if paper_id.is_empty() || !paper_id.is_ascii() {
-            return Err("invalid paper ID".into());
-        }
+        let resolved = resolve_paper_input(&params.paper_id, params.provider.as_deref())?;
+        let (client, paper_id) = self.provider_client(&resolved);
 
-        let meta = self
-            .client
+        let meta = client
             .get_metadata(&paper_id)
             .await
             .map_err(|e| format!("metadata fetch failed: {}", e))?;
@@ -155,14 +162,13 @@ impl MarkxivMcp {
             out.push_str(meta.summary.trim());
             out.push('\n');
         }
-        out.push_str(&format!(
-            "\n**Link:** https://arxiv.org/abs/{}",
-            paper_id
-        ));
+        out.push_str(&format!("\n**Link:** {}", resolved.public_link()));
         Ok(out)
     }
 
-    #[tool(description = "Search arXiv papers by keyword query. Returns matching papers with IDs, titles, authors, and abstracts.")]
+    #[tool(
+        description = "Search arXiv papers by keyword query. Returns matching papers with IDs, titles, authors, and abstracts."
+    )]
     async fn search_papers(
         &self,
         Parameters(params): Parameters<SearchPapersParams>,
@@ -175,7 +181,7 @@ impl MarkxivMcp {
         let max = params.max_results.unwrap_or(5).clamp(1, 20);
 
         let results = self
-            .client
+            .arxiv_client
             .search(&query, max)
             .await
             .map_err(|e| format!("search failed: {}", e))?;
@@ -207,25 +213,29 @@ impl MarkxivMcp {
                     out.push_str(&format!("**Abstract:** {}\n", summary));
                 }
             }
-            out.push_str(&format!(
-                "**Link:** https://arxiv.org/abs/{}\n\n",
-                r.id
-            ));
+            out.push_str(&format!("**Link:** https://arxiv.org/abs/{}\n\n", r.id));
         }
         Ok(out)
     }
 }
 
 impl MarkxivMcp {
-    async fn try_pdf_fallback(&self, paper_id: &str) -> Result<(String, bool), String> {
-        let pdf_bytes = self
-            .client
-            .get_pdf(paper_id)
-            .await
-            .map_err(|e| match e {
-                ArxivError::NotFound => format!("paper '{}' not found", paper_id),
-                other => format!("PDF fetch failed: {}", other),
-            })?;
+    fn provider_client(
+        &self,
+        resolved: &ResolvedPaper,
+    ) -> (&(dyn ArxivClient + Send + Sync), String) {
+        match resolved.provider {
+            Provider::Arxiv => (self.arxiv_client.as_ref(), resolved.paper_id.clone()),
+            Provider::Biorxiv => (self.biorxiv_client.as_ref(), resolved.paper_id.clone()),
+        }
+    }
+
+    async fn try_pdf_fallback(&self, resolved: &ResolvedPaper) -> Result<(String, bool), String> {
+        let (client, paper_id) = self.provider_client(resolved);
+        let pdf_bytes = client.get_pdf(&paper_id).await.map_err(|e| match e {
+            ArxivError::NotFound => format!("paper '{}' not found", paper_id),
+            other => format!("PDF fetch failed: {}", other),
+        })?;
 
         let text = self
             .converter
@@ -239,6 +249,69 @@ impl MarkxivMcp {
             })?;
 
         Ok((text, true))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Provider {
+    Arxiv,
+    Biorxiv,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedPaper {
+    provider: Provider,
+    paper_id: String,
+}
+
+impl ResolvedPaper {
+    fn public_link(&self) -> String {
+        match self.provider {
+            Provider::Arxiv => format!("https://arxiv.org/abs/{}", self.paper_id),
+            Provider::Biorxiv => biorxiv_article_url(&self.paper_id),
+        }
+    }
+}
+
+fn resolve_paper_input(input: &str, provider_hint: Option<&str>) -> Result<ResolvedPaper, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("invalid paper ID".into());
+    }
+
+    match provider_hint.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(provider) if provider == "arxiv" => {
+            let paper_id =
+                normalize_arxiv_id(trimmed).ok_or_else(|| "invalid arXiv paper ID".to_string())?;
+            Ok(ResolvedPaper {
+                provider: Provider::Arxiv,
+                paper_id,
+            })
+        }
+        Some(provider) if provider == "biorxiv" => {
+            let paper_id = normalize_biorxiv_id(trimmed)
+                .ok_or_else(|| "invalid bioRxiv paper ID".to_string())?;
+            Ok(ResolvedPaper {
+                provider: Provider::Biorxiv,
+                paper_id,
+            })
+        }
+        Some(_) => Err("unsupported provider; use 'arxiv' or 'biorxiv'".into()),
+        None => {
+            if let Some(paper_id) = normalize_biorxiv_id(trimmed) {
+                return Ok(ResolvedPaper {
+                    provider: Provider::Biorxiv,
+                    paper_id,
+                });
+            }
+            if let Some(paper_id) = normalize_arxiv_id(trimmed) {
+                return Ok(ResolvedPaper {
+                    provider: Provider::Arxiv,
+                    paper_id,
+                });
+            }
+            Err("invalid paper ID".into())
+        }
     }
 }
 
@@ -261,7 +334,7 @@ impl ServerHandler for MarkxivMcp {
 mod tests {
     use bytes::Bytes;
     use markxiv::arxiv::test_helpers::MockArxivClient;
-    use markxiv::arxiv::{ArxivClient, ArxivError, Metadata, SearchResult};
+    use markxiv::arxiv::{ArxivClient, ArxivError, Metadata, PaperSource, SearchResult};
     use markxiv::convert::test_helpers::MockConverter;
     use markxiv::convert::Converter;
 
@@ -477,14 +550,41 @@ mod tests {
         for (i, r) in results.iter().enumerate() {
             out.push_str(&format!("## {}. {}\n", i + 1, r.title.trim()));
             out.push_str(&format!("**arXiv ID:** {}\n", r.id));
-            out.push_str(&format!(
-                "**Link:** https://arxiv.org/abs/{}\n\n",
-                r.id
-            ));
+            out.push_str(&format!("**Link:** https://arxiv.org/abs/{}\n\n", r.id));
         }
         assert!(out.contains("## 1. Attention Is All You Need"));
         assert!(out.contains("**arXiv ID:** 1706.03762v5"));
         assert!(out.contains("## 2. Another Paper"));
+    }
+
+    #[test]
+    fn resolve_paper_input_detects_biorxiv_url() {
+        let resolved = super::resolve_paper_input(
+            "https://www.biorxiv.org/content/10.1101/2024.01.02.123456v1.full.pdf",
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved.provider, super::Provider::Biorxiv);
+        assert_eq!(resolved.paper_id, "10.1101/2024.01.02.123456v1");
+    }
+
+    #[test]
+    fn resolve_paper_input_respects_provider_override() {
+        let resolved = super::resolve_paper_input("1706.03762", Some("arxiv")).unwrap();
+        assert_eq!(resolved.provider, super::Provider::Arxiv);
+        assert_eq!(resolved.paper_id, "1706.03762");
+    }
+
+    #[test]
+    fn resolved_paper_public_link_uses_provider() {
+        let resolved = super::ResolvedPaper {
+            provider: super::Provider::Biorxiv,
+            paper_id: "10.1101/2024.01.02.123456v1".into(),
+        };
+        assert_eq!(
+            resolved.public_link(),
+            "https://www.biorxiv.org/content/10.1101/2024.01.02.123456v1.full"
+        );
     }
 }
 
