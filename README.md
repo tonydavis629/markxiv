@@ -211,7 +211,7 @@ See [`mcp/README.md`](mcp/README.md) for full documentation.
 - Conversion fidelity depends on pandoc and the paper’s LaTeX structure; complex macros/environments may not convert perfectly.
 - Title and abstract are prepended to the Markdown as `# Title` and a `##Abstract` heading followed by the abstract.
 - HTML is stripped from the final Markdown; embedded PDF figures are removed.
-- Caching is in-memory and optional on-disk; restart clears the in-memory cache.
+- Caching is in-memory and optional on-disk; restart clears the in-memory cache. Cached papers have no TTL, so use `?refresh=1` to pull the latest version if a paper has been updated.
 - For production use, consider timeouts, rate limiting, and persistent caching.
 
 ## Logging
