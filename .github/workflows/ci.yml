@@ -3,6 +3,7 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 # Cancel superseded PR runs, but never cancel a main-branch run mid-deploy.
@@ -129,3 +130,58 @@ jobs:
               -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
               -o StrictHostKeyChecking=yes \
               "root@${DEPLOY_HOST}" < payload.tar
+
+  # ----------------------------------------------------------------------------
+  # Release: only on a version tag (v*) that passed the `test` gate. Builds the
+  # same static musl binary and publishes a GitHub Release with the binary (plus
+  # a sha256) attached, so it can be downloaded directly from the Releases page.
+  # ----------------------------------------------------------------------------
+  release:
+    name: Publish GitHub release
+    needs: test
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools binutils
+
+      - name: Build release binary (static, musl)
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/markxiv dist/markxiv
+          strip dist/markxiv
+
+      - name: Package tarball + checksum
+        run: |
+          set -euo pipefail
+          cd dist
+          asset="markxiv-${GITHUB_REF_NAME}-x86_64-unknown-linux-musl.tar.gz"
+          tar -czf "$asset" markxiv
+          sha256sum "$asset" > "$asset.sha256"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            dist/markxiv-*.tar.gz \
+            dist/markxiv-*.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
