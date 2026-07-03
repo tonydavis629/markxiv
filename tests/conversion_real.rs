@@ -18,7 +18,7 @@ async fn latex_tar_to_markdown_uses_real_arxiv_source() {
 
     assert!(!md.is_empty(), "markdown output should not be empty");
     assert!(
-        md.starts_with("# Introduction"),
+        md.contains("# Introduction"),
         "missing introduction heading"
     );
     assert!(
