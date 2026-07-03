@@ -132,14 +132,15 @@ jobs:
               "root@${DEPLOY_HOST}" < payload.tar
 
   # ----------------------------------------------------------------------------
-  # Release: only on a version tag (v*) that passed the `test` gate. Builds the
-  # same static musl binary and publishes a GitHub Release with the binary (plus
-  # a sha256) attached, so it can be downloaded directly from the Releases page.
+  # Release: on every push that passed the `test` gate. A push to main refreshes
+  # a single rolling 'latest' prerelease; a v* tag push publishes an immutable
+  # versioned release. Both build the static musl binary and attach it (tarball
+  # + sha256) so it can be downloaded directly from the Releases page.
   # ----------------------------------------------------------------------------
   release:
     name: Publish GitHub release
     needs: test
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -179,9 +180,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
-            dist/markxiv-*.tar.gz \
-            dist/markxiv-*.tar.gz.sha256 \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            # Versioned release from a v* tag push: immutable, generated notes.
+            gh release create "$GITHUB_REF_NAME" \
+              dist/markxiv-*.tar.gz \
+              dist/markxiv-*.tar.gz.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          else
+            # Rolling build from a push to main: replace the single 'latest'
+            # prerelease so the Releases page keeps one always-current dev build
+            # (stable download URL) without burying the tagged versions.
+            gh release delete latest \
+              --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+            gh release create latest \
+              dist/markxiv-*.tar.gz \
+              dist/markxiv-*.tar.gz.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "latest (main)" \
+              --notes "Rolling build from ${GITHUB_SHA}." \
+              --prerelease
+          fi
