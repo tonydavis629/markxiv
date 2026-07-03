@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>markxiv — Markdown-formatted arXiv papers</title>
+<meta name="description" content="Markdown-formatted arXiv papers. Replace 'arxiv' with 'markxiv' in any arXiv URL to get the Markdown version.">
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b7280;
+    --accent: #b31b1b;
+    --border: #e5e7eb;
+    --code-bg: #f5f5f4;
+    --mark-bg: #ffe3e0;
+    --mark-fg: #8f1414;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --fg: #e8e8ea;
+      --muted: #9aa0a6;
+      --accent: #ff7a6b;
+      --border: #2a2e35;
+      --code-bg: #1d2026;
+      --mark-bg: #3a1f1c;
+      --mark-fg: #ff9c90;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0 auto;
+    max-width: 720px;
+    padding: 3.5rem 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  h1 {
+    margin: 0;
+    font-size: 2.6rem;
+    letter-spacing: -0.02em;
+  }
+  h1 .mark { color: var(--accent); }
+  .tagline { margin: 0.4rem 0 0; color: var(--muted); font-size: 1.15rem; }
+  h2 {
+    margin: 2.75rem 0 0.75rem;
+    font-size: 1.15rem;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  h3 { margin: 1.5rem 0 0.5rem; font-size: 1rem; }
+  p { margin: 0.75rem 0; }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  p code, li code {
+    background: var(--code-bg);
+    padding: 0.12em 0.4em;
+    border-radius: 5px;
+    font-size: 0.9em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    font-size: 0.88rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+
+  .swap {
+    margin: 1.75rem 0;
+    padding: 1.4rem 1.25rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--code-bg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    text-align: center;
+  }
+  .swap .row {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: clamp(0.8rem, 3.4vw, 1.05rem);
+    word-break: break-all;
+  }
+  .swap .dim { color: var(--muted); }
+  .swap .arrow { color: var(--accent); font-size: 1.3rem; line-height: 1; }
+  mark {
+    background: var(--mark-bg);
+    color: var(--mark-fg);
+    padding: 0.05em 0.28em;
+    border-radius: 5px;
+    font-weight: 600;
+  }
+  .swap-note { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.92rem; }
+
+  ul { padding-left: 1.25rem; }
+  li { margin: 0.3rem 0; }
+
+  .crypto { display: block; word-break: break-all; margin: 0.25rem 0; font-size: 0.82rem; }
+  .crypto .label { color: var(--muted); }
+
+  footer {
+    margin-top: 3.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+</style>
+</head>
+<body>
+
+  <header>
+    <h1><span class="mark">mark</span>xiv</h1>
+    <p class="tagline">Markdown-formatted arXiv papers.</p>
+  </header>
+
+  <section>
+    <h2>How it works</h2>
+    <p>Replace <code>arxiv</code> with <code>markxiv</code> in any arXiv URL to get the paper as clean Markdown.</p>
+    <div class="swap">
+      <span class="row"><mark>arxiv</mark><span class="dim">.org/abs/1706.03762</span></span>
+      <span class="arrow" aria-hidden="true">↓</span>
+      <span class="row"><mark>markxiv</mark><span class="dim">.org/abs/1706.03762</span></span>
+      <p class="swap-note">Add <code>Accept: text/markdown</code> (or open in a terminal) for raw Markdown.</p>
+    </div>
+    <p>Free and <a href="https://github.com/tonydavis629/markxiv">open source</a>.</p>
+  </section>
+
+  <section>
+    <h2>MCP server</h2>
+    <p>Use markxiv as an MCP tool in any MCP client so agents can convert arXiv papers to Markdown directly.</p>
+
+    <h3>Install</h3>
+    <pre><code># requires pandoc and poppler-utils (pdftotext)
+cargo install --git https://github.com/tonydavis629/markxiv --path mcp</code></pre>
+
+    <h3>Configure</h3>
+    <p>Add to your MCP config:</p>
+    <pre><code>{
+  "mcpServers": {
+    "markxiv": {
+      "command": "markxiv-mcp"
+    }
+  }
+}</code></pre>
+
+    <h3>Tools</h3>
+    <ul>
+      <li><strong>convert_paper</strong> — convert an arXiv paper to Markdown (e.g. <code>paper_id: "1706.03762"</code>)</li>
+      <li><strong>get_paper_metadata</strong> — get title, authors, and abstract</li>
+      <li><strong>search_papers</strong> — search arXiv by keyword</li>
+    </ul>
+    <p>See the <a href="https://github.com/tonydavis629/markxiv/tree/main/mcp">MCP README</a> for full documentation.</p>
+  </section>
+
+  <section>
+    <h2>Support</h2>
+    <ul>
+      <li><a href="https://github.com/sponsors/tonydavis629">GitHub Sponsors</a></li>
+    </ul>
+    <span class="crypto"><span class="label">Bitcoin</span> &nbsp;<code>bc1qskdeeraajt7lvzd0vr99ny7lw33wafcujgf0rj</code></span>
+    <span class="crypto"><span class="label">Monero</span> &nbsp;<code>846uyz3sTjfPYBTJko7NsFQQveX5nB1L3jQ2btV1shiRQ6HBDJ84Pxg25VdNz1PULMR7EUsHDMebuB8KHCd3FNov75FR79y</code></span>
+  </section>
+
+  <footer>
+    Made with ❤️ by <a href="https://tonyd.co">Tony Davis</a>
+  </footer>
+
+</body>
+</html>

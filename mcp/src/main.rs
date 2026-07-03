@@ -253,6 +253,23 @@ impl ServerHandler for MarkxivMcp {
     }
 }
 
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Log to stderr so stdout stays clean for MCP stdio transport
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
+    let service = MarkxivMcp::new();
+    let server = service.serve(rmcp::transport::stdio()).await?;
+    server.waiting().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -479,21 +496,4 @@ mod tests {
         assert!(out.contains("**arXiv ID:** 1706.03762v5"));
         assert!(out.contains("## 2. Another Paper"));
     }
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Log to stderr so stdout stays clean for MCP stdio transport
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
-    let service = MarkxivMcp::new();
-    let server = service.serve(rmcp::transport::stdio()).await?;
-    server.waiting().await?;
-    Ok(())
 }

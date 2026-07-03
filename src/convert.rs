@@ -339,10 +339,7 @@ fn normalize_display_math(input: &str) -> String {
 fn extract_figure_captions(input: &str) -> String {
     let mut out = input.to_string();
     let mut figure_num = 0u32;
-    loop {
-        let Some(start) = out.find("<figure") else {
-            break;
-        };
+    while let Some(start) = out.find("<figure") {
         if let Some(rel_end) = out[start..].find("</figure>") {
             let end = start + rel_end + "</figure>".len();
             let block = out[start..end].to_string();

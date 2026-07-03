@@ -15,40 +15,76 @@ use crate::{
 use tokio::sync::{Mutex, Semaphore};
 
 pub async fn index(headers: HeaderMap) -> Response {
-    let path = std::env::var("MARKXIV_INDEX_MD").unwrap_or_else(|_| "content/index.md".to_string());
-    match tokio::fs::read_to_string(&path).await {
-        Ok(md) => {
-            let wants_html = wants_html(
-                headers
-                    .get(axum::http::header::ACCEPT)
-                    .and_then(|v| v.to_str().ok()),
-            );
-            if wants_html {
-                let html = render_markdown_html(&md);
-                (
-                    StatusCode::OK,
-                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    html,
-                )
-                    .into_response()
-            } else {
-                (
-                    StatusCode::OK,
-                    [(
-                        axum::http::header::CONTENT_TYPE,
-                        "text/markdown; charset=utf-8",
-                    )],
-                    md,
-                )
-                    .into_response()
-            }
+    let wants_html = wants_html(
+        headers
+            .get(axum::http::header::ACCEPT)
+            .and_then(|v| v.to_str().ok()),
+    );
+
+    // Browsers get the hand-crafted HTML landing page; agents and
+    // `curl -H 'Accept: text/markdown'` get the raw Markdown source.
+    if wants_html {
+        // Prefer the styled HTML asset. Fall back to rendering the Markdown
+        // source so the site still works if the HTML file isn't present.
+        if let Ok(html) = tokio::fs::read_to_string(index_html_path()).await {
+            return html_response(html);
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to read index markdown: {}", e),
-        )
-            .into_response(),
+        match tokio::fs::read_to_string(index_md_path()).await {
+            Ok(md) => html_response(render_markdown_html(&md)),
+            Err(e) => index_read_error(e),
+        }
+    } else {
+        match tokio::fs::read_to_string(index_md_path()).await {
+            Ok(md) => (
+                StatusCode::OK,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/markdown; charset=utf-8",
+                )],
+                md,
+            )
+                .into_response(),
+            Err(e) => index_read_error(e),
+        }
     }
+}
+
+/// Path to the Markdown landing-page source served for `Accept: text/markdown`.
+fn index_md_path() -> String {
+    std::env::var("MARKXIV_INDEX_MD").unwrap_or_else(|_| "content/index.md".to_string())
+}
+
+/// Path to the styled HTML landing page served to browsers.
+///
+/// Honors `MARKXIV_INDEX_HTML` when set; otherwise derives the path from
+/// [`index_md_path`] by swapping a trailing `.md` for `.html`, so the single
+/// `MARKXIV_INDEX_MD` override the deploy already sets relocates both files.
+fn index_html_path() -> String {
+    if let Ok(p) = std::env::var("MARKXIV_INDEX_HTML") {
+        return p;
+    }
+    let md = index_md_path();
+    match md.strip_suffix(".md") {
+        Some(stem) => format!("{stem}.html"),
+        None => format!("{md}.html"),
+    }
+}
+
+fn html_response(html: String) -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
+fn index_read_error(e: std::io::Error) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("failed to read index: {}", e),
+    )
+        .into_response()
 }
 
 fn wants_html(accept: Option<&str>) -> bool {
@@ -844,5 +880,29 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let ct = res.headers().get(axum::http::header::CONTENT_TYPE).unwrap();
         assert_eq!(ct, "text/html; charset=utf-8");
+    }
+
+    #[tokio::test]
+    async fn index_serves_static_html_landing_page() {
+        // The browser response should be the hand-crafted content/index.html
+        // (which carries inline CSS), not the bare markdown-rendered fallback.
+        let app = Router::new().route("/", get(super::index));
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("<style"),
+            "expected styled static HTML landing page, got: {body}"
+        );
+        assert!(body.to_lowercase().contains("markxiv"));
     }
 }

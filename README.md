@@ -92,7 +92,8 @@ cargo run
 Environment variables:
 - `PORT` (default `8080`)
 - `MARKXIV_CACHE_CAP` (default `128`) — number of cached papers
-- `MARKXIV_INDEX_MD` (default `content/index.md`) — path to landing page Markdown
+- `MARKXIV_INDEX_MD` (default `content/index.md`) — landing page Markdown, served for `Accept: text/markdown`
+- `MARKXIV_INDEX_HTML` (default: `MARKXIV_INDEX_MD` with its `.md` swapped for `.html`) — landing page HTML served to browsers
 - `MARKXIV_PANDOC_PATH` (default `pandoc`) — path to pandoc binary
 - `MARKXIV_CACHE_DIR` (default `./cache`) — on-disk cache root directory
 - `MARKXIV_DISK_CACHE_CAP_BYTES` (default `0`) — on-disk cache size cap in bytes (0 disables disk cache)

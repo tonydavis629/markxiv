@@ -104,10 +104,12 @@ jobs:
           mkdir -p dist
           cp target/x86_64-unknown-linux-musl/release/markxiv dist/markxiv
           strip dist/markxiv
-          # Ship the landing-page markdown alongside the binary so prod always
-          # serves the committed content/index.md.
+          # Ship the landing-page assets alongside the binary so prod always
+          # serves the committed content/ files: index.html for browsers,
+          # index.md for `Accept: text/markdown`.
           cp content/index.md dist/index.md
-          tar -C dist -cf payload.tar markxiv index.md
+          cp content/index.html dist/index.html
+          tar -C dist -cf payload.tar markxiv index.md index.html
 
       - name: Deploy over SSH
         env:
