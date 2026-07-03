@@ -1,0 +1,129 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded PR runs, but never cancel a main-branch run mid-deploy.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Gate: must pass before anything is deployed. Deterministic — no network, no
+  # external tool versions. Runs on every push and PR.
+  # ----------------------------------------------------------------------------
+  test:
+    name: Test & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test (deterministic)
+        # Excludes tests/conversion_real.rs, which shells out to real pandoc /
+        # pdftotext and asserts on their exact output (see conversion-tests job).
+        run: |
+          cargo test --workspace --locked --lib --bins
+          cargo test --locked --test routes_integration
+
+  # ----------------------------------------------------------------------------
+  # Non-blocking: exercises the real pandoc/pdftotext conversion path. These are
+  # golden-output tests coupled to specific tool versions, so a version drift
+  # must not wedge the deploy pipeline. Informational only.
+  # ----------------------------------------------------------------------------
+  conversion-tests:
+    name: Conversion tests (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install pandoc + poppler-utils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc poppler-utils
+
+      - name: Conversion tests
+        run: cargo test --locked --test conversion_real
+
+  # ----------------------------------------------------------------------------
+  # Deploy: only on a push to main that passed the `test` gate. Builds a static
+  # musl binary and pipes it to prod over a restricted (forced-command) SSH key.
+  # ----------------------------------------------------------------------------
+  deploy:
+    name: Deploy to prod
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Serialize deploys; never cancel one in flight.
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools binutils
+
+      - name: Build release binary (static, musl) + deploy payload
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/markxiv dist/markxiv
+          strip dist/markxiv
+          # Ship the landing-page markdown alongside the binary so prod always
+          # serves the committed content/index.md.
+          cp content/index.md dist/index.md
+          tar -C dist -cf payload.tar markxiv index.md
+
+      - name: Deploy over SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.ssh"
+          install -m 600 /dev/null "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          # The remote forced command (markxiv-deploy) reads this tar from stdin,
+          # installs the binary + index.md atomically, and restarts the service.
+          ssh -i "$HOME/.ssh/deploy_key" \
+              -o IdentitiesOnly=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              -o StrictHostKeyChecking=yes \
+              "root@${DEPLOY_HOST}" < payload.tar

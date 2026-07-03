@@ -80,6 +80,7 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn paper(
     State(cache): State<Arc<Mutex<MkCache>>>,
     State(client): State<Arc<dyn ArxivClient + Send + Sync>>,
@@ -357,8 +358,8 @@ async fn convert_latex_with_retries(
 fn strip_html_tags(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut in_tag = false;
-    let mut chars = input.chars();
-    while let Some(ch) = chars.next() {
+    let chars = input.chars();
+    for ch in chars {
         match ch {
             '<' => {
                 in_tag = true;

@@ -64,7 +64,9 @@ impl MarkxivMcp {
         }
     }
 
-    #[tool(description = "Convert an arXiv paper to markdown. Returns the full paper content with title, authors, and abstract.")]
+    #[tool(
+        description = "Convert an arXiv paper to markdown. Returns the full paper content with title, authors, and abstract."
+    )]
     async fn convert_paper(
         &self,
         Parameters(params): Parameters<ConvertPaperParams>,
@@ -127,7 +129,9 @@ impl MarkxivMcp {
         Ok(body)
     }
 
-    #[tool(description = "Get metadata (title, authors, abstract) for an arXiv paper without converting the full content.")]
+    #[tool(
+        description = "Get metadata (title, authors, abstract) for an arXiv paper without converting the full content."
+    )]
     async fn get_paper_metadata(
         &self,
         Parameters(params): Parameters<GetMetadataParams>,
@@ -155,14 +159,13 @@ impl MarkxivMcp {
             out.push_str(meta.summary.trim());
             out.push('\n');
         }
-        out.push_str(&format!(
-            "\n**Link:** https://arxiv.org/abs/{}",
-            paper_id
-        ));
+        out.push_str(&format!("\n**Link:** https://arxiv.org/abs/{}", paper_id));
         Ok(out)
     }
 
-    #[tool(description = "Search arXiv papers by keyword query. Returns matching papers with IDs, titles, authors, and abstracts.")]
+    #[tool(
+        description = "Search arXiv papers by keyword query. Returns matching papers with IDs, titles, authors, and abstracts."
+    )]
     async fn search_papers(
         &self,
         Parameters(params): Parameters<SearchPapersParams>,
@@ -207,10 +210,7 @@ impl MarkxivMcp {
                     out.push_str(&format!("**Abstract:** {}\n", summary));
                 }
             }
-            out.push_str(&format!(
-                "**Link:** https://arxiv.org/abs/{}\n\n",
-                r.id
-            ));
+            out.push_str(&format!("**Link:** https://arxiv.org/abs/{}\n\n", r.id));
         }
         Ok(out)
     }
@@ -218,14 +218,10 @@ impl MarkxivMcp {
 
 impl MarkxivMcp {
     async fn try_pdf_fallback(&self, paper_id: &str) -> Result<(String, bool), String> {
-        let pdf_bytes = self
-            .client
-            .get_pdf(paper_id)
-            .await
-            .map_err(|e| match e {
-                ArxivError::NotFound => format!("paper '{}' not found", paper_id),
-                other => format!("PDF fetch failed: {}", other),
-            })?;
+        let pdf_bytes = self.client.get_pdf(paper_id).await.map_err(|e| match e {
+            ArxivError::NotFound => format!("paper '{}' not found", paper_id),
+            other => format!("PDF fetch failed: {}", other),
+        })?;
 
         let text = self
             .converter
@@ -477,10 +473,7 @@ mod tests {
         for (i, r) in results.iter().enumerate() {
             out.push_str(&format!("## {}. {}\n", i + 1, r.title.trim()));
             out.push_str(&format!("**arXiv ID:** {}\n", r.id));
-            out.push_str(&format!(
-                "**Link:** https://arxiv.org/abs/{}\n\n",
-                r.id
-            ));
+            out.push_str(&format!("**Link:** https://arxiv.org/abs/{}\n\n", r.id));
         }
         assert!(out.contains("## 1. Attention Is All You Need"));
         assert!(out.contains("**arXiv ID:** 1706.03762v5"));

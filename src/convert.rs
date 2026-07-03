@@ -32,6 +32,12 @@ pub trait Converter {
 
 pub struct PandocConverter;
 
+impl Default for PandocConverter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PandocConverter {
     pub fn new() -> Self {
         Self
@@ -171,10 +177,7 @@ async fn extract_tar(workdir: &Path, tar_path: &Path, gzip: bool) -> io::Result<
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("tar failed: {}", stderr),
-        ))
+        Err(io::Error::other(format!("tar failed: {}", stderr)))
     }
 }
 
@@ -188,12 +191,10 @@ async fn collect_tex_files(root: &Path) -> io::Result<Vec<(PathBuf, String)>> {
             let ft = entry.file_type().await?;
             if ft.is_dir() {
                 stack.push(path);
-            } else if ft.is_file() {
-                if path.extension().map(|e| e == "tex").unwrap_or(false) {
-                    match tokio::fs::read_to_string(&path).await {
-                        Ok(s) => out.push((path, s)),
-                        Err(_) => continue,
-                    }
+            } else if ft.is_file() && path.extension().map(|e| e == "tex").unwrap_or(false) {
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(s) => out.push((path, s)),
+                    Err(_) => continue,
                 }
             }
         }

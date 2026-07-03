@@ -92,8 +92,7 @@ impl DiskCache {
         let mut enc = GzEncoder::new(value.as_bytes(), Compression::default());
         let mut buf = Vec::new();
         use std::io::Read;
-        enc.read_to_end(&mut buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        enc.read_to_end(&mut buf).map_err(io::Error::other)?;
         // write atomically
         let tmp = path.with_extension("tmp");
         tokio::fs::write(&tmp, &buf).await.map_err(|e| {
@@ -159,7 +158,7 @@ impl DiskCache {
         let a = ((h >> 56) & 0xff) as u8;
         let b = ((h >> 48) & 0xff) as u8;
         let file = sanitize_filename(key);
-        let trimmed = file.trim_start_matches(|c| c == '/' || c == '\\');
+        let trimmed = file.trim_start_matches(['/', '\\']);
         let safe = if trimmed.is_empty() { "_" } else { trimmed };
         let path = self
             .cfg
@@ -278,10 +277,8 @@ mod tests {
                 let ty = entry.file_type().await.unwrap();
                 if ty.is_dir() {
                     stack.push(path);
-                } else if ty.is_file() {
-                    if path.extension().and_then(|s| s.to_str()) == Some("gz") {
-                        found = true;
-                    }
+                } else if ty.is_file() && path.extension().and_then(|s| s.to_str()) == Some("gz") {
+                    found = true;
                 }
             }
         }

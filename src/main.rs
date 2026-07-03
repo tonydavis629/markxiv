@@ -74,55 +74,6 @@ fn init_tracing() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{parse_port, resolve_log_path};
-    use std::ffi::OsString;
-    use std::path::PathBuf;
-
-    #[test]
-    fn path_env_takes_precedence() {
-        let result = resolve_log_path(
-            Some(OsString::from("/var/log/custom.log")),
-            Some(OsString::from("/should/not/use")),
-        );
-        assert_eq!(result, PathBuf::from("/var/log/custom.log"));
-    }
-
-    #[test]
-    fn dir_env_used_when_path_missing() {
-        let result = resolve_log_path(None, Some(OsString::from("/tmp/markxiv")));
-        assert_eq!(result, PathBuf::from("/tmp/markxiv/markxiv.log"));
-    }
-
-    #[test]
-    fn defaults_to_logs_directory() {
-        let result = resolve_log_path(None, None);
-        assert_eq!(result, PathBuf::from("logs/markxiv.log"));
-    }
-
-    #[test]
-    fn empty_dir_env_uses_filename_only() {
-        let result = resolve_log_path(None, Some(OsString::from("")));
-        assert_eq!(result, PathBuf::from("markxiv.log"));
-    }
-
-    #[test]
-    fn parse_port_prefers_valid_input() {
-        assert_eq!(parse_port(Some("9090".into())), 9090);
-    }
-
-    #[test]
-    fn parse_port_rejects_invalid_values() {
-        assert_eq!(parse_port(Some("not-a-number".into())), 8080);
-    }
-
-    #[test]
-    fn parse_port_defaults_when_missing() {
-        assert_eq!(parse_port(None), 8080);
-    }
-}
-
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
@@ -189,4 +140,53 @@ async fn main() {
     tracing::info!(%actual_addr, "listening");
     println!("Server listening on http://{actual_addr}");
     axum::serve(listener, app).await.expect("server");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_port, resolve_log_path};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn path_env_takes_precedence() {
+        let result = resolve_log_path(
+            Some(OsString::from("/var/log/custom.log")),
+            Some(OsString::from("/should/not/use")),
+        );
+        assert_eq!(result, PathBuf::from("/var/log/custom.log"));
+    }
+
+    #[test]
+    fn dir_env_used_when_path_missing() {
+        let result = resolve_log_path(None, Some(OsString::from("/tmp/markxiv")));
+        assert_eq!(result, PathBuf::from("/tmp/markxiv/markxiv.log"));
+    }
+
+    #[test]
+    fn defaults_to_logs_directory() {
+        let result = resolve_log_path(None, None);
+        assert_eq!(result, PathBuf::from("logs/markxiv.log"));
+    }
+
+    #[test]
+    fn empty_dir_env_uses_filename_only() {
+        let result = resolve_log_path(None, Some(OsString::from("")));
+        assert_eq!(result, PathBuf::from("markxiv.log"));
+    }
+
+    #[test]
+    fn parse_port_prefers_valid_input() {
+        assert_eq!(parse_port(Some("9090".into())), 9090);
+    }
+
+    #[test]
+    fn parse_port_rejects_invalid_values() {
+        assert_eq!(parse_port(Some("not-a-number".into())), 8080);
+    }
+
+    #[test]
+    fn parse_port_defaults_when_missing() {
+        assert_eq!(parse_port(None), 8080);
+    }
 }

@@ -38,6 +38,12 @@ pub struct ReqwestArxivClient {
     http: reqwest::Client,
 }
 
+impl Default for ReqwestArxivClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReqwestArxivClient {
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
@@ -184,11 +190,7 @@ impl ArxivClient for ReqwestArxivClient {
         parse_atom_metadata(&body).ok_or(ArxivError::NotFound)
     }
 
-    async fn search(
-        &self,
-        query: &str,
-        max_results: u32,
-    ) -> Result<Vec<SearchResult>, ArxivError> {
+    async fn search(&self, query: &str, max_results: u32) -> Result<Vec<SearchResult>, ArxivError> {
         let max_results = max_results.min(50);
         let url = Url::parse_with_params(
             "https://export.arxiv.org/api/query",
@@ -287,11 +289,7 @@ fn parse_atom_search_results(atom: &str) -> Vec<SearchResult> {
             .trim()
             .to_string();
         // Extract arXiv ID from full URL (e.g. "http://arxiv.org/abs/1706.03762v5" → "1706.03762v5")
-        let arxiv_id = id
-            .rsplit('/')
-            .next()
-            .unwrap_or(&id)
-            .to_string();
+        let arxiv_id = id.rsplit('/').next().unwrap_or(&id).to_string();
 
         if !title.is_empty() {
             results.push(SearchResult {
@@ -395,7 +393,10 @@ fn resolve_figure_img_url(base_url: &str, src: &str) -> String {
     // arXiv HTML pages can reference figure images as "<paper-id>vN/Figures/..."
     // even when the page URL is "/html/<paper-id>". In that case, joining with
     // "/html/<paper-id>/" duplicates the id segment, so anchor at "/html/".
-    if let Some(base_id) = base_url.path_segments().and_then(|mut segs| segs.next_back()) {
+    if let Some(base_id) = base_url
+        .path_segments()
+        .and_then(|mut segs| segs.next_back())
+    {
         let base_id_no_version = strip_version_suffix(base_id);
         let version_prefixed = src_trimmed.starts_with(&(base_id.to_string() + "/"))
             || src_trimmed.starts_with(&(base_id_no_version.to_string() + "v"));

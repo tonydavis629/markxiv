@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Heuristic: choose main .tex among (path, contents)
 pub fn select_main_tex(files: &[(PathBuf, String)]) -> Option<PathBuf> {
@@ -29,7 +29,7 @@ pub fn select_main_tex(files: &[(PathBuf, String)]) -> Option<PathBuf> {
     tex_files.into_iter().next().map(|(p, _)| p)
 }
 
-fn is_supplementary_name(p: &PathBuf) -> bool {
+fn is_supplementary_name(p: &Path) -> bool {
     let name = p
         .file_stem()
         .and_then(|s| s.to_str())
