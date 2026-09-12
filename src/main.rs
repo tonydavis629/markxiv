@@ -13,6 +13,10 @@ use markxiv::state::AppState;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
+/// Days of rotated logs to keep. Prod was sitting on a single unbounded 124 MB
+/// file before this.
+const LOG_FILES_KEPT: usize = 14;
+
 fn resolve_log_path(path_env: Option<OsString>, dir_env: Option<OsString>) -> PathBuf {
     if let Some(path) = path_env {
         let candidate = PathBuf::from(path);
@@ -28,6 +32,18 @@ fn resolve_log_path(path_env: Option<OsString>, dir_env: Option<OsString>) -> Pa
         PathBuf::from("markxiv.log")
     } else {
         dir.join("markxiv.log")
+    }
+}
+
+/// Splits a log file name into the `(prefix, suffix)` pair the rolling appender
+/// joins around its date stamp, so `markxiv.log` rotates to
+/// `markxiv.<date>.log` rather than growing without bound.
+fn split_log_file_name(file_name: &str) -> (String, Option<String>) {
+    match file_name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
+            (stem.to_string(), Some(ext.to_string()))
+        }
+        _ => (file_name.to_string(), None),
     }
 }
 
@@ -58,7 +74,29 @@ fn init_tracing() {
         .map(|name| name.to_owned())
         .unwrap_or_else(|| OsString::from("markxiv.log"));
 
-    let file_appender = tracing_appender::rolling::never(directory, file_name);
+    // `Rotation::DAILY` on its own only splits files; `max_log_files` is the part
+    // that actually bounds disk use.
+    let (prefix, suffix) = split_log_file_name(&file_name.to_string_lossy());
+    let mut builder = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(prefix)
+        .max_log_files(LOG_FILES_KEPT);
+    if let Some(suffix) = suffix {
+        builder = builder.filename_suffix(suffix);
+    }
+    // Unlike the infallible `never()`, `build()` can fail; degrade to a single
+    // unrotated file rather than losing logging altogether.
+    let file_appender = match builder.build(&directory) {
+        Ok(appender) => appender,
+        Err(e) => {
+            eprintln!(
+                "failed to build rolling log appender in {}: {}; falling back to a single file",
+                directory.display(),
+                e
+            );
+            tracing_appender::rolling::never(&directory, &file_name)
+        }
+    };
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -144,7 +182,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_port, resolve_log_path};
+    use super::{parse_port, resolve_log_path, split_log_file_name};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -173,6 +211,35 @@ mod tests {
     fn empty_dir_env_uses_filename_only() {
         let result = resolve_log_path(None, Some(OsString::from("")));
         assert_eq!(result, PathBuf::from("markxiv.log"));
+    }
+
+    #[test]
+    fn split_log_file_name_separates_extension() {
+        let (prefix, suffix) = split_log_file_name("markxiv.log");
+        assert_eq!(prefix, "markxiv");
+        assert_eq!(suffix.as_deref(), Some("log"));
+    }
+
+    #[test]
+    fn split_log_file_name_handles_missing_extension() {
+        let (prefix, suffix) = split_log_file_name("markxiv");
+        assert_eq!(prefix, "markxiv");
+        assert_eq!(suffix, None);
+    }
+
+    #[test]
+    fn split_log_file_name_keeps_dotfile_intact() {
+        // A leading dot is not an extension separator.
+        let (prefix, suffix) = split_log_file_name(".markxiv");
+        assert_eq!(prefix, ".markxiv");
+        assert_eq!(suffix, None);
+    }
+
+    #[test]
+    fn split_log_file_name_splits_on_last_dot_only() {
+        let (prefix, suffix) = split_log_file_name("markxiv.server.log");
+        assert_eq!(prefix, "markxiv.server");
+        assert_eq!(suffix.as_deref(), Some("log"));
     }
 
     #[test]

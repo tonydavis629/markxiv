@@ -8,7 +8,7 @@ use axum::Router;
 use bytes::Bytes;
 use tower::ServiceExt;
 
-use markxiv::arxiv::{test_helpers::MockArxivClient, ArxivError, Metadata};
+use markxiv::arxiv::{test_helpers::MockArxivClient, ArxivError, Metadata, NetKind};
 use markxiv::convert::{test_helpers::MockConverter, ConvertError};
 use markxiv::disk_cache::{DiskCache, DiskCacheConfig};
 use markxiv::routes;
@@ -70,9 +70,9 @@ async fn disk_cache_survives_across_states() {
     // New state with failing client should be satisfied from disk
     let client2 = MockArxivClient::new(
         Ok(true),
-        Err(ArxivError::Network("should not fetch".into())),
-        Err(ArxivError::Network("should not fetch".into())),
-        Err(ArxivError::Network("should not fetch".into())),
+        Err(ArxivError::network(NetKind::Other, "should not fetch")),
+        Err(ArxivError::network(NetKind::Other, "should not fetch")),
+        Err(ArxivError::network(NetKind::Other, "should not fetch")),
     );
     let archive_calls = client2.archive_calls.clone();
     let pdf_calls = client2.pdf_calls.clone();

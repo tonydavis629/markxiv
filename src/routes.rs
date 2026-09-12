@@ -127,6 +127,35 @@ pub async fn paper(
     original_uri: OriginalUri,
     raw_query: Option<RawQuery>,
 ) -> Response {
+    // One budget for the whole request. A cache miss makes up to four upstream
+    // calls, so per-attempt timeouts alone would compound; this bounds the total.
+    crate::arxiv::with_upstream_budget(
+        crate::arxiv::UPSTREAM_BUDGET,
+        paper_inner(
+            cache,
+            client,
+            converter,
+            disk,
+            convert_limit,
+            raw_id,
+            original_uri,
+            raw_query,
+        ),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn paper_inner(
+    cache: Arc<Mutex<MkCache>>,
+    client: Arc<dyn ArxivClient + Send + Sync>,
+    converter: Arc<dyn Converter + Send + Sync>,
+    disk: Option<Arc<DiskCache>>,
+    convert_limit: Arc<Semaphore>,
+    raw_id: String,
+    original_uri: OriginalUri,
+    raw_query: Option<RawQuery>,
+) -> Response {
     let trimmed = raw_id.trim();
     let normalized = normalize_id(trimmed);
 
@@ -278,9 +307,17 @@ fn map_arxiv_err(context: &str, id: &str, e: ArxivError) -> Response {
             tracing::warn!(paper_id = %id, context = %context, "arXiv provided PDF-only asset");
             (StatusCode::UNPROCESSABLE_ENTITY, "Error: PDF only").into_response()
         }
-        ArxivError::Network(msg) => {
-            tracing::error!(paper_id = %id, context = %context, error = %msg, "arXiv network error");
-            (StatusCode::BAD_GATEWAY, msg).into_response()
+        ArxivError::Network { kind, ref msg, .. } => {
+            // `msg` carries upstream URLs and reqwest internals: log it, never
+            // serve it.
+            tracing::error!(
+                paper_id = %id,
+                context = %context,
+                outcome = kind.outcome(),
+                error = %msg,
+                "arXiv network error"
+            );
+            (StatusCode::BAD_GATEWAY, "upstream arXiv request failed").into_response()
         }
         ArxivError::NotImplemented => {
             tracing::warn!(paper_id = %id, context = %context, "arXiv feature not implemented");
@@ -818,6 +855,89 @@ mod tests {
         assert_eq!(latex_calls.load(Ordering::SeqCst), 1);
         assert_eq!(latex_nomacro_calls.load(Ordering::SeqCst), 1);
         assert_eq!(converter_pdf_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn scripted_mock_drives_distinct_responses_per_call() {
+        // `MockArxivClient` used to return one canned `Result` forever, so it could
+        // not express "fail, then succeed". The script makes the first request 502
+        // and the second serve normally, against the same client.
+        let id = "1234.5678";
+        let meta = Metadata {
+            title: "Sample Title".into(),
+            summary: "Sample abstract".into(),
+            authors: Vec::new(),
+        };
+        let client = MockArxivClient::new(
+            Ok(true),
+            Ok(Bytes::from_static(b"tar-bytes")),
+            Err(ArxivError::NotImplemented),
+            Ok(meta.clone()),
+        )
+        .script_metadata(vec![
+            Err(ArxivError::network(
+                crate::arxiv::NetKind::Timeout,
+                "upstream stalled",
+            )),
+            Ok(meta),
+        ]);
+        let metadata_calls = client.metadata_calls.clone();
+        let converter = MockConverter::new(Ok("# Hello".into()), Ok(String::new()));
+        let state = AppState::new(8, client, converter, None);
+
+        let app = Router::new()
+            .route("/abs/:id", get(super::paper))
+            .with_state(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/abs/{}", id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            body.as_ref(),
+            b"upstream arXiv request failed",
+            "the 502 body must not leak the internal message"
+        );
+
+        let second = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/abs/{}", id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(metadata_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn network_error_body_hides_the_upstream_url() {
+        let resp = super::map_arxiv_err(
+            "metadata",
+            "2606.29150",
+            ArxivError::network(
+                crate::arxiv::NetKind::Timeout,
+                "error sending request for url (https://export.arxiv.org/api/query?id_list=2606.29150)",
+            ),
+        );
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            !body.contains("arxiv.org"),
+            "leaked an internal URL: {body}"
+        );
+        assert!(!body.contains("id_list"), "leaked query params: {body}");
     }
 
     #[tokio::test]

@@ -156,8 +156,28 @@ async fn make_temp_dir() -> io::Result<PathBuf> {
     ))
 }
 
+/// Flattens captured child stderr to a single bounded line.
+///
+/// `tar` and `pandoc` emit multi-line diagnostics, and `tracing` renders
+/// `Display` verbatim — so unflattened stderr puts raw `tar: ...` lines into the
+/// log file and breaks any line-anchored parsing of it. It also keeps an
+/// unbounded blob of tool output out of error messages that reach clients.
+fn one_line_stderr(stderr: &[u8]) -> String {
+    const MAX_CHARS: usize = 500;
+    let text = String::from_utf8_lossy(stderr);
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > MAX_CHARS {
+        flat.chars().take(MAX_CHARS).collect::<String>() + "..."
+    } else {
+        flat
+    }
+}
+
 async fn extract_tar(workdir: &Path, tar_path: &Path, gzip: bool) -> io::Result<()> {
     let mut cmd = Command::new("tar");
+    // Without `kill_on_drop`, a timed-out child is merely abandoned: tokio never
+    // signals it, so it keeps running and allocating after we stop waiting.
+    cmd.kill_on_drop(true);
     cmd.current_dir(workdir);
     if gzip {
         cmd.args(["-x", "-z", "-f"])
@@ -176,8 +196,10 @@ async fn extract_tar(workdir: &Path, tar_path: &Path, gzip: bool) -> io::Result<
     if out.status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(io::Error::other(format!("tar failed: {}", stderr)))
+        Err(io::Error::other(format!(
+            "tar failed: {}",
+            one_line_stderr(&out.stderr)
+        )))
     }
 }
 
@@ -217,6 +239,8 @@ async fn run_pandoc(
     mode: PandocLatexMode,
 ) -> Result<Vec<u8>, ConvertError> {
     let mut cmd = Command::new(pandoc);
+    // Essential here: an abandoned pandoc grows to ~1.7 GB and OOM-kills the box.
+    cmd.kill_on_drop(true);
     let format_arg = match mode {
         PandocLatexMode::Standard => "latex",
         PandocLatexMode::NoMacros => "latex-latex_macros",
@@ -234,8 +258,10 @@ async fn run_pandoc(
     if out.status.success() {
         Ok(out.stdout)
     } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(ConvertError::Failed(format!("pandoc failed: {}", stderr)))
+        Err(ConvertError::Failed(format!(
+            "pandoc failed: {}",
+            one_line_stderr(&out.stderr)
+        )))
     }
 }
 
@@ -245,6 +271,7 @@ async fn cleanup(path: &Path) {
 
 async fn run_pdftotext(pdftotext: &str, pdf_path: &Path) -> Result<Vec<u8>, ConvertError> {
     let mut cmd = Command::new(pdftotext);
+    cmd.kill_on_drop(true);
     cmd.arg("-raw").arg(pdf_path).arg("-");
     let out = timeout(Duration::from_secs(300), cmd.output())
         .await
@@ -253,10 +280,9 @@ async fn run_pdftotext(pdftotext: &str, pdf_path: &Path) -> Result<Vec<u8>, Conv
     if out.status.success() {
         Ok(out.stdout)
     } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
         Err(ConvertError::Failed(format!(
             "pdftotext failed: {}",
-            stderr
+            one_line_stderr(&out.stderr)
         )))
     }
 }
@@ -491,6 +517,34 @@ fn strip_html_tags_preserve_math(input: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod stderr_tests {
+    use super::one_line_stderr;
+
+    #[test]
+    fn collapses_multiline_tool_output_to_one_line() {
+        // Real `tar` output: unflattened, these become stray lines in the log file.
+        let raw = b"tar: This does not look like a tar archive\ntar: Skipping to next header\ntar: Exiting with failure status due to previous errors\n";
+        let flat = one_line_stderr(raw);
+        assert!(!flat.contains('\n'));
+        assert!(flat.starts_with("tar: This does not look like a tar archive tar: Skipping"));
+    }
+
+    #[test]
+    fn truncates_runaway_output() {
+        let raw = "x ".repeat(2000);
+        let flat = one_line_stderr(raw.as_bytes());
+        assert!(flat.chars().count() <= 503);
+        assert!(flat.ends_with("..."));
+    }
+
+    #[test]
+    fn leaves_short_output_alone() {
+        assert_eq!(one_line_stderr(b"pandoc: boom"), "pandoc: boom");
+        assert_eq!(one_line_stderr(b""), "");
+    }
 }
 
 #[cfg(test)]

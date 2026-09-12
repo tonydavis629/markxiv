@@ -9,7 +9,7 @@ edition = "2021"
 [dependencies]
 regex = "1"
 axum = { version = "0.7", features = ["original-uri"] }
-tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "process", "fs"] }
+tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "process", "fs", "time", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "deflate", "brotli"] }
 lru = "0.12"
 thiserror = "1.0"
@@ -27,6 +27,11 @@ dotenvy = "0.15"
 
 [dev-dependencies]
 tower = "0.5"
+# Retry/timeout behaviour lives inside `ReqwestArxivClient`, behind the
+# `ArxivClient` trait, so a trait-level mock cannot reach it. wiremock drives the
+# real client against a local HTTP server.
+wiremock = "0.6"
+tokio = { version = "1.39", features = ["test-util"] }
 
 [profile.release]
 codegen-units = 1

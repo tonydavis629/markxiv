@@ -213,12 +213,15 @@ See [`mcp/README.md`](mcp/README.md) for full documentation.
 - Title and abstract are prepended to the Markdown as `# Title` and a `##Abstract` heading followed by the abstract.
 - HTML is stripped from the final Markdown; embedded PDF figures are removed.
 - Caching is in-memory and optional on-disk; restart clears the in-memory cache. Cached papers have no TTL, so use `?refresh=1` to pull the latest version if a paper has been updated.
-- For production use, consider timeouts, rate limiting, and persistent caching.
+- `MARKXIV_CACHE_CAP` counts **entries** of uncompressed markdown (~66 KB each on average), not bytes, so size it against available RAM — the compressed on-disk cache is the durable one.
+- Upstream arXiv calls use a 5 s connect timeout and a 20 s per-attempt timeout, retry once on a timeout, connect failure, 429, 5xx or 403, and share a 45 s budget across the whole request.
+- For production use, consider rate limiting and persistent caching.
 
 ## Logging
 
-- By default the server writes structured request/error logs to `./logs/markxiv.log`; ensure the process user can create that directory.
-- Override the location with `MARKXIV_LOG_PATH=/abs/path/to/markxiv.log` or `MARKXIV_LOG_DIR=/var/log/markxiv` (generates `/var/log/markxiv/markxiv.log`).
+- By default the server writes structured request/error logs to `./logs/`; ensure the process user can create that directory.
+- **Logs rotate daily and files carry a date stamp**: `markxiv.<YYYY-MM-DD>.log` (e.g. `logs/markxiv.2026-09-12.log`). The newest 14 are kept and older ones are deleted, so the log directory no longer grows without bound. Anything that tailed the fixed path `markxiv.log` must be pointed at the dated name, e.g. `tail -f logs/markxiv.$(date +%F).log`.
+- Override the location with `MARKXIV_LOG_PATH=/abs/path/to/markxiv.log` or `MARKXIV_LOG_DIR=/var/log/markxiv`. The file name supplies the rotation prefix and suffix, so `markxiv.log` produces `markxiv.<date>.log`.
 - If the file cannot be opened (e.g., missing write permissions), logging automatically falls back to stderr/journald.
 - When running under systemd, confirm the service `User`/`Group` owns or can write to the configured log directory, e.g. `sudo chown -R markxiv:markxiv /var/log/markxiv`.
 - Quick check: verify the service account can write to the cache (or any target directory) via `sudo -u markxiv test -w /mnt/markxiv-cache && echo writable`.
