@@ -339,6 +339,10 @@ fn map_convert_err(context: &str, id: &str, e: ConvertError) -> Response {
     }
 }
 
+// The `Err` variant is a fully-built HTTP response that every caller returns
+// one frame up, so boxing it would add a heap allocation on the error path and
+// buy nothing.
+#[allow(clippy::result_large_err)]
 async fn pdf_fallback(
     client: &(dyn ArxivClient + Send + Sync),
     converter: &(dyn Converter + Send + Sync),
