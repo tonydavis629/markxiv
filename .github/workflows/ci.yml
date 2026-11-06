@@ -45,6 +45,7 @@ jobs:
           cargo test --workspace --locked --lib --bins
           cargo test --locked --test routes_integration
           cargo test --locked --test arxiv_client
+          cargo test --locked --test temp_cleanup
 
   # ----------------------------------------------------------------------------
   # Non-blocking: exercises the real pandoc/pdftotext conversion path. These are

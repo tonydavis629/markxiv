@@ -112,8 +112,14 @@ fn render_markdown_html(md: &str) -> String {
     html_output
 }
 
-pub async fn health() -> &'static str {
-    "ok"
+/// `ok`, or 503 when conversions cannot get a scratch dir (e.g. disk full),
+/// so a monitor sees the outage instead of a green check.
+pub async fn health() -> Response {
+    if crate::convert::temp_dir_writable().await {
+        "ok".into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "temp dir not writable").into_response()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

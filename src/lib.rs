@@ -1,3 +1,6 @@
+// async_trait expands to #[must_use] on futures, which newer clippy flags.
+#![allow(clippy::double_must_use)]
+
 pub mod arxiv;
 pub mod cache;
 pub mod convert;

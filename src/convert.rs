@@ -63,7 +63,7 @@ impl Converter for PandocConverter {
         let workdir = make_temp_dir()
             .await
             .map_err(|e| ConvertError::Failed(format!("temp dir: {}", e)))?;
-        let pdf_path = workdir.join("source.pdf");
+        let pdf_path = workdir.path().join("source.pdf");
 
         tokio::fs::write(&pdf_path, pdf_bytes)
             .await
@@ -71,11 +71,7 @@ impl Converter for PandocConverter {
 
         let pdftotext =
             std::env::var("MARKXIV_PDFTOTEXT_PATH").unwrap_or_else(|_| "pdftotext".into());
-        let result = run_pdftotext(&pdftotext, &pdf_path).await;
-
-        cleanup(&workdir).await;
-
-        let text_bytes = result?;
+        let text_bytes = run_pdftotext(&pdftotext, &pdf_path).await?;
         Ok(String::from_utf8_lossy(&text_bytes).into_owned())
     }
 }
@@ -89,39 +85,36 @@ impl PandocConverter {
         let workdir = make_temp_dir()
             .await
             .map_err(|e| ConvertError::Failed(format!("temp dir: {}", e)))?;
-        let tar_path = workdir.join("source.tar");
+        let workdir_path = workdir.path();
+        let tar_path = workdir_path.join("source.tar");
         // write bytes to disk
         tokio::fs::write(&tar_path, tar_bytes)
             .await
             .map_err(|e| ConvertError::Failed(format!("write tar: {}", e)))?;
 
         // extract: try plain tar, then gzip
-        if let Err(e1) = extract_tar(&workdir, &tar_path, false).await {
-            extract_tar(&workdir, &tar_path, true)
+        if let Err(e1) = extract_tar(workdir_path, &tar_path, false).await {
+            extract_tar(workdir_path, &tar_path, true)
                 .await
                 .map_err(|e2| ConvertError::Failed(format!("extract: {}; fallback: {}", e1, e2)))?;
         }
 
         // Collect .tex files
-        let files = collect_tex_files(&workdir)
+        let files = collect_tex_files(workdir_path)
             .await
             .map_err(|e| ConvertError::Failed(format!("scan: {}", e)))?;
         let Some(main_tex) = select_main_tex(&files) else {
-            cleanup(&workdir).await;
             return Err(ConvertError::Failed("no .tex files found".into()));
         };
 
         // Run pandoc
         let pandoc = std::env::var("MARKXIV_PANDOC_PATH").unwrap_or_else(|_| "pandoc".into());
-        let main_parent = main_tex.parent().unwrap_or(Path::new(&workdir));
+        let main_parent = main_tex.parent().unwrap_or(workdir_path);
         let main_file = main_tex
             .file_name()
             .and_then(|s| s.to_str())
             .ok_or_else(|| ConvertError::Failed("invalid main tex path".into()))?;
         let md_bytes = run_pandoc(&pandoc, main_parent, main_file, mode).await?;
-
-        // cleanup best-effort
-        cleanup(&workdir).await;
 
         let mut md = String::from_utf8_lossy(&md_bytes).into_owned();
         md = sanitize_markdown(&md);
@@ -133,7 +126,29 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-async fn make_temp_dir() -> io::Result<PathBuf> {
+const TEMP_PREFIX: &str = "markxiv-";
+
+/// A per-conversion scratch directory, removed when dropped.
+///
+/// Cleanup lives in `Drop` so it runs on every exit: success, any `?` error
+/// (pandoc failure, timeout, bad archive) and a cancelled request future.
+/// Cleaning up only on the happy path leaked an extracted source tree per
+/// failed conversion and filled the disk (ENOSPC, 2026-11).
+struct WorkDir(PathBuf);
+
+impl WorkDir {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn make_temp_dir() -> io::Result<WorkDir> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let base = std::env::temp_dir();
     let pid = std::process::id();
@@ -143,9 +158,9 @@ async fn make_temp_dir() -> io::Result<PathBuf> {
         .as_nanos();
     for _ in 0..5 {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = base.join(format!("markxiv-{}-{}-{}", pid, nanos, n));
+        let dir = base.join(format!("{}{}-{}-{}", TEMP_PREFIX, pid, nanos, n));
         match tokio::fs::create_dir(&dir).await {
-            Ok(_) => return Ok(dir),
+            Ok(_) => return Ok(WorkDir(dir)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
@@ -154,6 +169,48 @@ async fn make_temp_dir() -> io::Result<PathBuf> {
         io::ErrorKind::AlreadyExists,
         "failed to create unique temp dir",
     ))
+}
+
+/// Removes leftover `markxiv-*` scratch dirs under the temp dir: every one
+/// owned by another process (a crash or kill skips `Drop`), and this process's
+/// own once older than `max_age` (no conversion runs that long). Returns how
+/// many were removed.
+pub fn sweep_stale_temp_dirs(max_age: Duration) -> usize {
+    sweep_stale_temp_dirs_in(&std::env::temp_dir(), max_age)
+}
+
+fn sweep_stale_temp_dirs_in(base: &Path, max_age: Duration) -> usize {
+    let own = format!("{}{}-", TEMP_PREFIX, std::process::id());
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(TEMP_PREFIX) {
+            continue;
+        }
+        if name.starts_with(&own) {
+            let age = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok());
+            if age.is_none_or(|a| a < max_age) {
+                continue;
+            }
+        }
+        if std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// True when a conversion scratch dir can be created right now.
+pub async fn temp_dir_writable() -> bool {
+    make_temp_dir().await.is_ok()
 }
 
 /// Flattens captured child stderr to a single bounded line.
@@ -263,10 +320,6 @@ async fn run_pandoc(
             one_line_stderr(&out.stderr)
         )))
     }
-}
-
-async fn cleanup(path: &Path) {
-    let _ = tokio::fs::remove_dir_all(path).await;
 }
 
 async fn run_pdftotext(pdftotext: &str, pdf_path: &Path) -> Result<Vec<u8>, ConvertError> {

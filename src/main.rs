@@ -112,6 +112,9 @@ fn init_tracing() {
     }
 }
 
+/// Older than any conversion can run (pdftotext's limit is 300 s).
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(900);
+
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
@@ -125,6 +128,26 @@ async fn main() {
 
     let client = ReqwestArxivClient::new();
     let converter = PandocConverter::new();
+
+    // Scratch dirs left by a crashed or killed process never hit their Drop
+    // cleanup; clear them now and keep sweeping so the disk cannot fill up.
+    let removed = markxiv::convert::sweep_stale_temp_dirs(STALE_TEMP_AGE);
+    if removed > 0 {
+        tracing::warn!(removed, "removed stale conversion temp dirs");
+    }
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            let removed = tokio::task::spawn_blocking(|| {
+                markxiv::convert::sweep_stale_temp_dirs(STALE_TEMP_AGE)
+            })
+            .await
+            .unwrap_or(0);
+            if removed > 0 {
+                tracing::warn!(removed, "removed stale conversion temp dirs");
+            }
+        }
+    });
 
     // Optional disk cache
     let disk_cap_bytes = std::env::var("MARKXIV_DISK_CACHE_CAP_BYTES")
