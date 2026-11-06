@@ -112,14 +112,10 @@ fn render_markdown_html(md: &str) -> String {
     html_output
 }
 
-/// `ok`, or 503 when conversions cannot get a scratch dir (e.g. disk full),
-/// so a monitor sees the outage instead of a green check.
-pub async fn health() -> Response {
-    if crate::convert::temp_dir_writable().await {
-        "ok".into_response()
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "temp dir not writable").into_response()
-    }
+/// Liveness only. The deploy script and the proxy gate on this, so it must not
+/// fail for a degraded dependency such as a full disk: cached papers still serve.
+pub async fn health() -> &'static str {
+    "ok"
 }
 
 #[allow(clippy::too_many_arguments)]

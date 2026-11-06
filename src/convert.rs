@@ -208,11 +208,6 @@ fn sweep_stale_temp_dirs_in(base: &Path, max_age: Duration) -> usize {
     removed
 }
 
-/// True when a conversion scratch dir can be created right now.
-pub async fn temp_dir_writable() -> bool {
-    make_temp_dir().await.is_ok()
-}
-
 /// Flattens captured child stderr to a single bounded line.
 ///
 /// `tar` and `pandoc` emit multi-line diagnostics, and `tracing` renders
