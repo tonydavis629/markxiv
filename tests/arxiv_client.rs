@@ -27,6 +27,17 @@ fn client(server: &MockServer) -> ReqwestArxivClient {
     ReqwestArxivClient::with_bases(&server.uri(), &server.uri())
 }
 
+/// Metadata failures now fall through to the abs page, so count API hits only.
+async fn api_hits(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/api/query")
+        .count()
+}
+
 fn net_kind(err: &ArxivError) -> Option<NetKind> {
     err.kind()
 }
@@ -71,7 +82,7 @@ async fn metadata_gives_up_after_two_attempts() {
         .unwrap_err();
     assert_eq!(net_kind(&err), Some(NetKind::Status(503)));
     assert_eq!(
-        server.received_requests().await.unwrap().len(),
+        api_hits(&server).await,
         2,
         "initial attempt plus exactly one retry"
     );
@@ -112,10 +123,43 @@ async fn metadata_refuses_to_wait_out_a_long_retry_after() {
         .unwrap_err();
     assert_eq!(net_kind(&err), Some(NetKind::Status(429)));
     assert_eq!(
-        server.received_requests().await.unwrap().len(),
+        api_hits(&server).await,
         1,
         "an honest 600 s should fail the request, not stall it"
     );
+}
+
+const ABS_PAGE: &str = r#"<html><head>
+<meta name="citation_title" content="Sketchpad: certified &amp; exact arithmetic" />
+<meta name="citation_author" content="Mohsenvand, Mostafa &#39;Neo&#39;" />
+<meta name="citation_author" content="Doe, Jane" />
+<meta name="citation_abstract" content="Language models are accurate." />
+</head></html>"#;
+
+#[tokio::test]
+async fn throttled_api_falls_back_to_the_abs_page_and_cools_down() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/query"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/abs/2611.04434v1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ABS_PAGE))
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    let meta = c.get_metadata("2611.04434v1").await.expect("abs fallback");
+    assert_eq!(meta.title, "Sketchpad: certified & exact arithmetic");
+    assert_eq!(meta.authors, vec!["Mostafa 'Neo' Mohsenvand", "Jane Doe"]);
+    assert_eq!(meta.summary, "Language models are accurate.");
+    let hits = api_hits(&server).await;
+
+    // While the API is cooling down, the next lookup skips it entirely.
+    c.get_metadata("2611.04434v1").await.expect("abs again");
+    assert_eq!(api_hits(&server).await, hits);
 }
 
 #[tokio::test]

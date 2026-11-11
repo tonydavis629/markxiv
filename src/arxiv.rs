@@ -342,7 +342,15 @@ pub struct ReqwestArxivClient {
     http: reqwest::Client,
     api_base: String,
     site_base: String,
+    /// Set when export.arxiv.org rate-limits us; until then metadata comes
+    /// straight from the abs page instead of hitting the API again.
+    api_cooldown: std::sync::Mutex<Option<Instant>>,
 }
+
+/// How long to leave the metadata API alone after it answered 429. arXiv
+/// throttles our IP for long stretches under bursts, while arxiv.org itself
+/// keeps serving the abs page.
+const API_COOLDOWN: Duration = Duration::from_secs(60);
 
 impl Default for ReqwestArxivClient {
     fn default() -> Self {
@@ -372,6 +380,7 @@ impl ReqwestArxivClient {
             http,
             api_base: API_BASE.to_string(),
             site_base: SITE_BASE.to_string(),
+            api_cooldown: std::sync::Mutex::new(None),
         }
     }
 
@@ -432,6 +441,60 @@ impl ReqwestArxivClient {
                 Err(ArxivError::from_reqwest(e))
             }
         }
+    }
+    async fn metadata_from_api(&self, id: &str) -> Result<Metadata, ArxivError> {
+        with_retries("metadata", id, |attempt| async move {
+            let url = query_url(&self.api_base, &[("id_list", id)])?;
+            let req = self
+                .http
+                .get(url)
+                .header(reqwest::header::ACCEPT, "application/atom+xml");
+            let res = self.send_attempt("metadata", id, attempt, req).await?;
+
+            let status = res.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Err(ArxivError::NotFound);
+            }
+            if !status.is_success() {
+                return Err(ArxivError::http("metadata", status, retry_after_hint(&res)));
+            }
+            let body = res.text().await.map_err(ArxivError::from_reqwest)?;
+            match parse_atom_metadata(&body) {
+                Some(meta) => Ok(meta),
+                // A feed that parsed but carried no <entry> means arXiv has no such
+                // paper: a real 404. A body that is not a feed at all is an upstream
+                // failure dressed as a 200, and must not reach the user as a 404.
+                None if is_empty_atom_feed(&body) => Err(ArxivError::NotFound),
+                None => Err(ArxivError::network(
+                    NetKind::Decode,
+                    "arXiv metadata response was not a parseable Atom feed",
+                )),
+            }
+        })
+        .await
+    }
+
+    /// The abs page carries the same title/abstract/authors as citation_* meta
+    /// tags, and lives on arxiv.org rather than the throttled API host.
+    async fn metadata_from_abs(&self, id: &str) -> Result<Metadata, ArxivError> {
+        with_retries("abs", id, |attempt| async move {
+            let url = format!("{}/abs/{}", self.site_base, id);
+            let res = self
+                .send_attempt("abs", id, attempt, self.http.get(&url))
+                .await?;
+            let status = res.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Err(ArxivError::NotFound);
+            }
+            if !status.is_success() {
+                return Err(ArxivError::http("abs", status, retry_after_hint(&res)));
+            }
+            let html = res.text().await.map_err(ArxivError::from_reqwest)?;
+            parse_abs_metadata(&html).ok_or_else(|| {
+                ArxivError::network(NetKind::Decode, "abs page had no citation_title")
+            })
+        })
+        .await
     }
 }
 
@@ -593,35 +656,30 @@ impl ArxivClient for ReqwestArxivClient {
     }
 
     async fn get_metadata(&self, id: &str) -> Result<Metadata, ArxivError> {
-        with_retries("metadata", id, |attempt| async move {
-            let url = query_url(&self.api_base, &[("id_list", id)])?;
-            let req = self
-                .http
-                .get(url)
-                .header(reqwest::header::ACCEPT, "application/atom+xml");
-            let res = self.send_attempt("metadata", id, attempt, req).await?;
-
-            let status = res.status();
-            if status == reqwest::StatusCode::NOT_FOUND {
-                return Err(ArxivError::NotFound);
+        let cooling = self
+            .api_cooldown
+            .lock()
+            .unwrap()
+            .is_some_and(|until| Instant::now() < until);
+        if !cooling {
+            match self.metadata_from_api(id).await {
+                Ok(meta) => return Ok(meta),
+                Err(ArxivError::NotFound) => return Err(ArxivError::NotFound),
+                Err(err) => {
+                    if err.kind() == Some(NetKind::Status(429)) {
+                        *self.api_cooldown.lock().unwrap() = Some(Instant::now() + API_COOLDOWN);
+                    }
+                    tracing::warn!(
+                        upstream = "metadata",
+                        paper_id = id,
+                        outcome = err.outcome(),
+                        "metadata API failed; reading the abs page instead"
+                    );
+                    return self.metadata_from_abs(id).await.map_err(|_| err);
+                }
             }
-            if !status.is_success() {
-                return Err(ArxivError::http("metadata", status, retry_after_hint(&res)));
-            }
-            let body = res.text().await.map_err(ArxivError::from_reqwest)?;
-            match parse_atom_metadata(&body) {
-                Some(meta) => Ok(meta),
-                // A feed that parsed but carried no <entry> means arXiv has no such
-                // paper: a real 404. A body that is not a feed at all is an upstream
-                // failure dressed as a 200, and must not reach the user as a 404.
-                None if is_empty_atom_feed(&body) => Err(ArxivError::NotFound),
-                None => Err(ArxivError::network(
-                    NetKind::Decode,
-                    "arXiv metadata response was not a parseable Atom feed",
-                )),
-            }
-        })
-        .await
+        }
+        self.metadata_from_abs(id).await
     }
 
     async fn search(&self, query: &str, max_results: u32) -> Result<Vec<SearchResult>, ArxivError> {
@@ -740,6 +798,47 @@ fn parse_atom_search_results(atom: &str) -> Vec<SearchResult> {
         remainder = &remainder[end..];
     }
     results
+}
+
+/// Reads `<meta name="citation_*" content="...">` tags from an abs page.
+fn parse_abs_metadata(html: &str) -> Option<Metadata> {
+    let metas = |name: &str| -> Vec<String> {
+        let needle = format!("<meta name=\"{}\" content=\"", name);
+        html.match_indices(&needle)
+            .filter_map(|(at, _)| {
+                let rest = &html[at + needle.len()..];
+                rest.find('"')
+                    .map(|end| decode_entities(rest[..end].trim()))
+            })
+            .collect()
+    };
+    let title = metas("citation_title").into_iter().next()?;
+    let summary = metas("citation_abstract")
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    // "Last, First" in the meta tags; the API and our output use "First Last".
+    let authors = metas("citation_author")
+        .into_iter()
+        .map(|a| match a.split_once(", ") {
+            Some((last, first)) => format!("{} {}", first, last),
+            None => a,
+        })
+        .collect();
+    Some(Metadata {
+        title,
+        summary,
+        authors,
+    })
+}
+
+fn decode_entities(s: &str) -> String {
+    s.replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 fn parse_atom_metadata(atom: &str) -> Option<Metadata> {
